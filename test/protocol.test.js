@@ -171,6 +171,119 @@ test('sanitizeSchema strips unsupported vocabulary recursively', () => {
   assert.deepEqual(out, { type: 'object', properties: { list: { type: 'array', items: { type: 'string' } } } });
 });
 
+test('sanitizeSchema allowlist drops title/format/default/minimum/constraints at depth', () => {
+  const out = sanitizeSchema({
+    type: 'object',
+    title: 'T',
+    required: ['a', 5],
+    properties: {
+      a: {
+        type: 'string',
+        format: 'date-time',
+        default: 'x',
+        examples: ['y'],
+        minLength: 2,
+        pattern: '^a',
+        description: 'keep me',
+      },
+      n: { type: 'integer', minimum: 0, maximum: 10, exclusiveMinimum: true, multipleOf: 2 },
+      arr: { type: 'array', minItems: 1, maxItems: 3, uniqueItems: true, contains: { type: 'string' } },
+      cond: { allOf: [{ type: 'string' }], if: true, then: {}, not: {} },
+      meta: { type: 'object', propertyNames: { pattern: '^x' }, dependencies: { a: ['b'] } },
+    },
+  });
+  assert.deepEqual(out, {
+    type: 'object',
+    required: ['a'],
+    properties: {
+      a: { type: 'string', description: 'keep me' },
+      n: { type: 'integer' },
+      arr: { type: 'array' },
+      cond: {},
+      meta: { type: 'object' },
+    },
+  });
+});
+
+test('sanitizeSchema converts const to enum including inside oneOf branches', () => {
+  // The exact shape that produced upstream 400 "Unknown name \"const\"":
+  // one_of[0].properties[0].value.const
+  const out = sanitizeSchema({
+    type: 'object',
+    oneOf: [
+      { type: 'object', properties: { kind: { const: 'path', type: 'string' } }, required: ['kind'] },
+      { type: 'object', properties: { kind: { const: 'text', type: 'string' } }, required: ['kind'] },
+    ],
+    properties: { mode: { const: 'auto' } },
+  });
+  assert.deepEqual(out, {
+    type: 'object',
+    oneOf: [
+      { type: 'object', properties: { kind: { type: 'string', enum: ['path'] } }, required: ['kind'] },
+      { type: 'object', properties: { kind: { type: 'string', enum: ['text'] } }, required: ['kind'] },
+    ],
+    properties: { mode: { enum: ['auto'] } },
+  });
+});
+
+test('sanitizeSchema flattens type unions, stringifies/drops enums, guards bad parameters', () => {
+  assert.deepEqual(
+    sanitizeSchema({ type: ['string', 'null'], enum: ['a', 2, true] }),
+    { type: 'string', enum: ['a', '2', 'true'] },
+  );
+  // Non-string-typed enums cannot be enforced by the proto enum → dropped.
+  assert.deepEqual(sanitizeSchema({ type: 'integer', enum: [1, 2] }), { type: 'integer' });
+  // const under a non-string type is dropped, not stringified into a lie.
+  assert.deepEqual(sanitizeSchema({ type: 'number', const: 5 }), { type: 'number' });
+  // Garbage top-level parameters fall back to an empty object schema.
+  assert.deepEqual(sanitizeSchema('nope'), { type: 'object', properties: {} });
+  assert.deepEqual(sanitizeSchema([{ type: 'string' }]), { type: 'object', properties: {} });
+  // Boolean property shorthand → unconstrained schema instead of leaking `true`.
+  assert.deepEqual(sanitizeSchema({ type: 'object', properties: { a: true } }), {
+    type: 'object',
+    properties: { a: {} },
+  });
+});
+
+test('openaiToGeminiRequest sanitizes real-world DSH tool schemas (const + oneOf)', () => {
+  const { request } = openaiToGeminiRequest({
+    messages: [{ role: 'user', content: 'x' }],
+    tools: [
+      {
+        type: 'function',
+        function: {
+          name: 'edit',
+          description: 'Edit a file',
+          parameters: {
+            $schema: 'https://json-schema.org/draft/2020-12/schema',
+            type: 'object',
+            oneOf: [
+              { properties: { kind: { const: 'replace' } }, required: ['kind'] },
+              { properties: { kind: { const: 'insert' } }, required: ['kind'] },
+            ],
+            properties: { kind: { description: 'how to edit', const: 'replace' } },
+            additionalProperties: false,
+          },
+        },
+      },
+    ],
+  });
+  const decl = request.tools[0].functionDeclarations[0];
+  assert.equal(decl.name, 'edit');
+  // Nothing the upstream proto does not know may survive sanitization.
+  const allowed = new Set(['type', 'description', 'enum', 'items', 'properties', 'required', 'anyOf', 'oneOf', 'propertyOrdering']);
+  const walk = (s) => {
+    for (const [k, v] of Object.entries(s)) {
+      assert.ok(allowed.has(k), `unexpected schema key ${k}`);
+      if (v && typeof v === 'object' && !Array.isArray(v)) for (const sub of Object.values(v)) { if (sub && typeof sub === 'object') walk(sub); }
+      if (Array.isArray(v)) for (const sub of v) { if (sub && typeof sub === 'object') walk(sub); }
+    }
+  };
+  walk(decl.parameters);
+  assert.deepEqual(decl.parameters.oneOf.map((b) => b.required), [['kind'], ['kind']]);
+  assert.deepEqual(decl.parameters.properties.kind, { description: 'how to edit', enum: ['replace'] });
+});
+
 // ---------- envelope ----------
 
 test('antigravityEnvelope wraps, strips, and keeps session identity', () => {

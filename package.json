@@ -1,7 +1,7 @@
 {
   "name": "dsh-gemini-oauth-bridge",
   "description": "Bridge Google AI subscription (Antigravity/Gemini OAuth, Code Assist API) into DeepSeek Harness as an OpenAI-compatible model endpoint",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
