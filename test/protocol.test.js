@@ -387,3 +387,85 @@ test('parseAvailableModels normalizes map and array shapes', () => {
   assert.deepEqual(parseAvailableModels({}), { ids: [], caps: {} });
   assert.deepEqual(parseAvailableModels(null), { ids: [], caps: {} });
 });
+
+// ---------- settings.yaml surgical merge ----------
+
+import { mergeProviderYaml, buildProviderYamlLines } from '../lib/protocol.js';
+
+const BODY6 = buildProviderYamlLines('127.0.0.1:3080', ['gemini-3.1-pro-high', 'claude-opus-4-6-thinking']);
+
+test('mergeProviderYaml appends a fresh llm-pi-ai block to an unrelated file', () => {
+  const before = 'model: glm-5.3-flash\nagent-default-model:\n  provider: zai-coding-cn\n';
+  const r = mergeProviderYaml(before, 'gemini-oauth', BODY6);
+  assert.ok(r.ok);
+  assert.match(r.text, /\nllm-pi-ai:\n  providers:\n    gemini-oauth:\n      api: openai-completions\n/);
+  assert.match(r.text, /agent-default-model:\n  provider: zai-coding-cn\n/);
+  assert.ok(r.text.endsWith('\n'));
+  // idempotent
+  const again = mergeProviderYaml(r.text, 'gemini-oauth', BODY6);
+  assert.equal(again.text, r.text);
+});
+
+test('mergeProviderYaml inserts the provider without touching sibling providers', () => {
+  const before = [
+    'llm-pi-ai:',
+    '  providers:',
+    '    kimi-coding:',
+    '      apiKeyEnv: KIMI_CODING_API_KEY',
+    '    zai-coding-cn:',
+    '      apiKeyEnv: ZAI_CODING_CN_API_KEY',
+    '      models:',
+    '        - id: glm-5.3',
+    '',
+    'agent-default-model:',
+    '  provider: zai-coding-cn',
+  ].join('\n');
+  const r = mergeProviderYaml(before, 'gemini-oauth', BODY6);
+  assert.ok(r.ok);
+  const out = r.text.split('\n');
+  assert.match(r.text, /    gemini-oauth:\n      api: openai-completions\n      baseURL: http:\/\/127\.0\.0\.1:3080\/gemini-oauth-bridge\/v1\n      models:\n        - id: gemini-3\.1-pro-high\n        - id: claude-opus-4-6-thinking\n/);
+  // siblings preserved verbatim and in order
+  const kimi = out.indexOf('    kimi-coding:');
+  const zai = out.indexOf('    zai-coding-cn:');
+  const mine = out.indexOf('    gemini-oauth:');
+  assert.ok(kimi !== -1 && zai !== -1 && mine !== -1);
+  assert.ok(kimi < zai);
+  assert.equal(out[out.length - 1], '  provider: zai-coding-cn');
+  // idempotent
+  assert.equal(mergeProviderYaml(r.text, 'gemini-oauth', BODY6).text, r.text);
+});
+
+test('mergeProviderYaml replaces an existing gemini-oauth block in place', () => {
+  const before = [
+    'llm-pi-ai:',
+    '  providers:',
+    '    gemini-oauth:',
+    '      api: openai-completions',
+    '      baseURL: http://127.0.0.1:3080/gemini-oauth-bridge/v1',
+    '      models:',
+    '        - id: gemini-3-pro',
+    '    zai-coding-cn:',
+    '      apiKeyEnv: ZAI_CODING_CN_API_KEY',
+  ].join('\n');
+  const r = mergeProviderYaml(before, 'gemini-oauth', BODY6);
+  assert.ok(r.ok);
+  assert.ok(!r.text.includes('gemini-3-pro\n'));
+  assert.match(r.text, /- id: gemini-3\.1-pro-high\n/);
+  // zai block survives, after the replaced block
+  const mine = r.text.indexOf('    gemini-oauth:');
+  const zai = r.text.indexOf('    zai-coding-cn:');
+  assert.ok(mine !== -1 && zai > mine);
+  assert.match(r.text, /    zai-coding-cn:\n      apiKeyEnv: ZAI_CODING_CN_API_KEY$/);
+  assert.equal(mergeProviderYaml(r.text, 'gemini-oauth', BODY6).text, r.text);
+});
+
+test('mergeProviderYaml creates providers under an existing llm-pi-ai and refuses inline values', () => {
+  const before = 'llm-pi-ai:\n  retryPolicy: x\n';
+  const r = mergeProviderYaml(before, 'gemini-oauth', BODY6);
+  assert.ok(r.ok);
+  assert.match(r.text, /llm-pi-ai:\n  providers:\n    gemini-oauth:\n/);
+  assert.match(r.text, /  retryPolicy: x\n/);
+
+  const inline = 'llm-pi-ai: {}\n';
+  assert.equal(mergeProviderYaml(inline, 'gemini-oauth', BODY6).ok, false);
+});

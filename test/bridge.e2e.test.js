@@ -60,6 +60,18 @@ const upstream = http.createServer((req, res) => {
       res.end('data: [DONE]\n\n');
       return;
     }
+    if (path === '/v1internal:fetchAvailableModels') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        models: {
+          'gemini-3.1-pro-high': { displayName: 'Gemini 3.1 Pro (High)', maxCompletionTokens: 65536 },
+          'claude-opus-4-6-thinking': { displayName: 'Claude Opus 4.6 (Thinking)' },
+          'chat_20706': {},
+          'tab_flash_lite_preview': {},
+        },
+      }));
+      return;
+    }
     if (path === '/v1internal:generateContent') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(
@@ -241,4 +253,25 @@ test('streamed SSE survives byte-level fragmentation from upstream (cooldown byp
   } finally {
     upstream.mode = undefined;
   }
+});
+
+test('refresh-models syncs llm-pi-ai.providers.gemini-oauth into settings.yaml', async () => {
+  const res = await fetch(`http://127.0.0.1:${port}/gemini-oauth-bridge/api/refresh-models`, { method: 'POST' });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.ok, true);
+  assert.equal(body.provider.ok, true);
+  assert.equal(body.provider.models, 2, 'chat_/tab_ junk ids are filtered');
+
+  const settingsPath = join(fakeHome, '.dsh', 'settings.yaml');
+  const text = readFileSync(settingsPath, 'utf8');
+  assert.match(text, new RegExp('llm-pi-ai:\\n  providers:\\n    gemini-oauth:\\n      api: openai-completions\\n      baseURL: http://127\\.0\\.0\\.1:' + port + '/gemini-oauth-bridge/v1\\n      models:\\n        - id: gemini-3\\.1-pro-high\\n        - id: claude-opus-4-6-thinking\\n$'));
+  assert.ok(!text.includes('chat_20706'));
+  assert.ok(!text.includes('tab_flash_lite_preview'));
+
+  // second sync is byte-identical (idempotent)
+  const before = text;
+  const res2 = await fetch(`http://127.0.0.1:${port}/gemini-oauth-bridge/api/refresh-models`, { method: 'POST' });
+  assert.equal(res2.status, 200);
+  assert.equal(readFileSync(settingsPath, 'utf8'), before);
 });

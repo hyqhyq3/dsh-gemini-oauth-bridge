@@ -43,7 +43,7 @@ llm-pi-ai:
         - id: gemini-3.7-flash-high
 ```
 
-4. Restart DSH and pick the models in the model selector. **No apiKey needed** (the bridge does not check auth headers by default; to add local auth, set `"apiKey": "some-string"` in `~/.dsh/gemini-oauth-bridge.json` — requests must then carry `Authorization: Bearer <value>`).
+4. Restart DSH and pick the models in the model selector. **Step 3 is usually unnecessary**: logging in and refreshing the model list write this block automatically (the `baseURL` port follows the address you use to open the DSH UI). **No apiKey needed** (the bridge does not check auth headers by default; to add local auth, set `"apiKey": "some-string"` in `~/.dsh/gemini-oauth-bridge.json` — requests must then carry `Authorization: Bearer <value>`).
 
 ### Local state
 
@@ -68,6 +68,7 @@ Protocol details follow the public implementation in [CLIProxyAPI](https://githu
 - **Connection fingerprint**: no `Connection: close`; keep-alive reuse.
 - **Backoff**: on 429, reads the `Retry-After` header or in-body `retryDelay`, enters a per-model cooldown (capped at 30 min) with no upstream traffic during it.
 - **Subscription tier resolution**: request entitlements follow `paidTier.id` (Google AI Pro → `g1-pro-tier`); a `free-tier` `currentTier` is just the registration state and does not limit quota or model access.
+- **Automatic provider configuration**: on login and on 刷新模型列表 (refresh models), the `llm-pi-ai.providers.gemini-oauth` block (with the latest model ids) is surgically merged into `~/.dsh/settings.yaml` — every other byte of your config is preserved, and a one-time backup is kept at `settings.yaml.bak-gemini-oauth-bridge`. Internal `chat_*`/`tab_*` ids are filtered out. Takes effect after a DSH restart; set `"providerSync": false` in the state file to opt out.
 - **Public client credentials**: the OAuth client credentials are public values embedded in the Antigravity app (published verbatim in CLIProxyAPI's repo); they are stored base64-encoded in this repository only to keep GitHub push protection quiet, and decoded at runtime.
 
 ## Limitations
