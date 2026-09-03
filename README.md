@@ -39,8 +39,8 @@ llm-pi-ai:
       api: openai-completions
       baseURL: http://127.0.0.1:3080/gemini-oauth-bridge/v1
       models:
-        - id: gemini-3-pro
-        - id: gemini-3-flash
+        - id: gemini-3.1-pro-high
+        - id: gemini-3.7-flash-high
 ```
 
 4. Restart DSH and pick the models in the model selector. **No apiKey needed** (the bridge does not check auth headers by default; to add local auth, set `"apiKey": "some-string"` in `~/.dsh/gemini-oauth-bridge.json` — requests must then carry `Authorization: Bearer <value>`).
@@ -67,6 +67,7 @@ Protocol details follow the public implementation in [CLIProxyAPI](https://githu
 - **Envelope semantics**: `requestType: "agent"`, `requestId: "agent-<uuid>"`, `userAgent: "antigravity"`, `request.sessionId` derived deterministically from the conversation's first message (one session per conversation); `safetySettings` stripped; `generationConfig.maxOutputTokens` removed for gemini-3 models.
 - **Connection fingerprint**: no `Connection: close`; keep-alive reuse.
 - **Backoff**: on 429, reads the `Retry-After` header or in-body `retryDelay`, enters a per-model cooldown (capped at 30 min) with no upstream traffic during it.
+- **Subscription tier resolution**: request entitlements follow `paidTier.id` (Google AI Pro → `g1-pro-tier`); a `free-tier` `currentTier` is just the registration state and does not limit quota or model access.
 - **Public client credentials**: the OAuth client credentials are public values embedded in the Antigravity app (published verbatim in CLIProxyAPI's repo); they are stored base64-encoded in this repository only to keep GitHub push protection quiet, and decoded at runtime.
 
 ## Limitations

@@ -355,3 +355,35 @@ test('history translation re-attaches thoughtSignature via opts.getSignature', (
   const { request: bare } = openaiToGeminiRequest(body);
   assert.ok(!('thoughtSignature' in bare.contents[1].parts[0]));
 });
+
+// ---------- tier resolution & model catalog parsing ----------
+
+import { resolveTier, parseAvailableModels } from '../lib/protocol.js';
+
+test('resolveTier prefers the paid subscription tier over currentTier', () => {
+  assert.equal(resolveTier({ paidTier: { id: 'g1-pro-tier', name: 'Google AI Pro' }, currentTier: { id: 'free-tier' } }), 'g1-pro-tier');
+  assert.equal(resolveTier({ currentTier: { id: 'standard-tier' } }), 'standard-tier');
+  assert.equal(resolveTier({ allowedTiers: [{ id: 'free-tier', isDefault: true }] }), 'free-tier');
+  assert.equal(resolveTier({}), 'free-tier');
+  assert.equal(resolveTier(null), 'free-tier');
+});
+
+test('parseAvailableModels normalizes map and array shapes', () => {
+  const map = parseAvailableModels({
+    models: {
+      'gemini-3.1-pro-low': { displayName: 'Gemini 3.1 Pro (Low)', contextLength: 1000000, maxCompletionTokens: 65536 },
+      'claude-opus-4-6-thinking': { displayName: 'Claude Opus 4.6 (Thinking)' },
+      '': { displayName: 'skipped' },
+    },
+  });
+  assert.deepEqual(map.ids, ['gemini-3.1-pro-low', 'claude-opus-4-6-thinking']);
+  assert.deepEqual(map.caps['gemini-3.1-pro-low'], { contextLength: 1000000, maxCompletionTokens: 65536 });
+  assert.ok(!('claude-opus-4-6-thinking' in map.caps));
+
+  const arr = parseAvailableModels({ models: ['a', { id: 'b', context_length: 8 }, { name: 'c' }] });
+  assert.deepEqual(arr.ids, ['a', 'b', 'c']);
+  assert.deepEqual(arr.caps.b, { contextLength: 8 });
+
+  assert.deepEqual(parseAvailableModels({}), { ids: [], caps: {} });
+  assert.deepEqual(parseAvailableModels(null), { ids: [], caps: {} });
+});

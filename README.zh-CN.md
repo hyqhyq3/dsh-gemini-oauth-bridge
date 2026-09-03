@@ -41,8 +41,8 @@ llm-pi-ai:
       api: openai-completions
       baseURL: http://127.0.0.1:3080/gemini-oauth-bridge/v1
       models:
-        - id: gemini-3-pro
-        - id: gemini-3-flash
+        - id: gemini-3.1-pro-high
+        - id: gemini-3.7-flash-high
 ```
 
 4. 重启 DSH，在模型选择器里选用。**不需要配置 apiKey**（插件不校验鉴权头；如需加一层本机鉴权，可在 `~/.dsh/gemini-oauth-bridge.json` 里设置 `"apiKey": "任意字符串"`，之后请求需带 `Authorization: Bearer <该值>`）。
@@ -69,6 +69,7 @@ llm-pi-ai:
 - **信封语义**：`requestType: "agent"`、`requestId: "agent-<uuid>"`、`userAgent: "antigravity"`、`request.sessionId` 由对话首条消息稳定哈希派生（同一会话不换 session）；删除 `safetySettings`；gemini-3 系剔除 `generationConfig.maxOutputTokens`。
 - **连接指纹**：不发送 `Connection: close`，复用 keep-alive 连接。
 - **限流退避**：429 时读取 `Retry-After` 头或响应内 `retryDelay`，进入按模型冷却（上限 30 分钟），冷却期内不发出上游请求。
+- **订阅 tier 识别**：请求权益按 `paidTier.id` 解析（Google AI Pro → `g1-pro-tier`），`currentTier` 显示 free-tier 只是注册态，不影响实际配额与模型访问。
 - **公开客户端凭据**：OAuth client 凭据是 Antigravity 应用内嵌的公开值（CLIProxyAPI 开源库同样原样公开），仓库中以 base64 形式存放——只为避免 GitHub push protection 的扫描噪声，运行时解码。
 
 ## 局限
