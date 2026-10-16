@@ -46,7 +46,7 @@ llm-pi-ai:
         - id: gemini-3.7-flash-high
 ```
 
-4. 重启 DSH，在模型选择器里选用。**第 3 步通常无需手动做**：登录和刷新模型列表时会自动写入这段配置（`baseURL` 端口取自你访问 DSH 页面的地址）。DSH 要求 provider 必须声明凭据引用，因此插件会同时在 `~/.dsh/.credentials.yaml`（mode 0600）里补上固定占位 key `dsh-gemini-oauth-bridge`（引用名 `GEMINI_OAUTH_API_KEY`）——已有条目不会被覆盖，桥接端接受任意 key。想用自己的 key，可在 Models 页面里改；如需给桥接本身加一层本机鉴权，可在 `~/.dsh/gemini-oauth-bridge.json` 里设置 `"apiKey": "任意字符串"`，之后请求需带 `Authorization: Bearer <该值>`。
+4. 在模型选择器里选用。**第 3 步通常无需手动做**：登录和刷新模型列表时会自动写入这段配置（`baseURL` 端口取自你访问 DSH 页面的地址）。DSH ≥ 0.2 时插件通过 settings 服务（与官方 Models 页面相同的路径）更新 `llm-pi-ai` 条目——变更即时热生效并持久化到活跃 profile 的 `cordis.patch.yml`，无需重启；旧版本 DSH 走遗留的 `~/.dsh/settings.yaml` 写入，重启后生效。DSH 要求 provider 必须声明凭据引用，因此插件会同时在 `~/.dsh/.credentials.yaml`（mode 0600）里补上固定占位 key `dsh-gemini-oauth-bridge`（引用名 `GEMINI_OAUTH_API_KEY`）——已有条目不会被覆盖，桥接端接受任意 key。想用自己的 key，可在 Models 页面里改；如需给桥接本身加一层本机鉴权，可在 `~/.dsh/gemini-oauth-bridge.json` 里设置 `"apiKey": "任意字符串"`，之后请求需带 `Authorization: Bearer <该值>`。
 
 ### 本地状态
 
@@ -71,7 +71,7 @@ llm-pi-ai:
 - **连接指纹**：不发送 `Connection: close`，复用 keep-alive 连接。
 - **限流退避**：429 时读取 `Retry-After` 头或响应内 `retryDelay`，进入按模型冷却（上限 30 分钟），冷却期内不发出上游请求。
 - **订阅 tier 识别**：请求权益按 `paidTier.id` 解析（Google AI Pro → `g1-pro-tier`），`currentTier` 显示 free-tier 只是注册态，不影响实际配额与模型访问。
-- **provider 自动配置**：登录成功和「刷新模型列表」时，自动把 `llm-pi-ai.providers.gemini-oauth`（含最新模型 ID 和 `GEMINI_OAUTH_API_KEY` 凭据引用）外科手术式合并进 `~/.dsh/settings.yaml`——其他配置字节保持不变，首次修改前自动备份为 `settings.yaml.bak-gemini-oauth-bridge`。同时在 `~/.dsh/.credentials.yaml` 里补上占位 key（只追加，不覆盖；无法确认结构的 version-1 文档一律不动并如实报错）。`chat_*`/`tab_*` 内部 ID 会被过滤。重启 DSH 后生效；在 state 文件中设 `"providerSync": false` 可关闭自动写入。
+- **provider 自动配置**：登录成功和「刷新模型列表」时，自动写入 `llm-pi-ai.providers.gemini-oauth` 路由（含最新模型 ID 和 `GEMINI_OAUTH_API_KEY` 凭据引用）。DSH 提供设置服务时走官方 Models 页面同款路径——变更即时热生效并持久化到活跃 profile 的 `cordis.patch.yml`，只动 gemini-oauth 这一个路由，且由适配器自身的 schema 校验、失败自动回滚；同时保留对遗留 `~/.dsh/settings.yaml` 的同步写入（外科手术式合并，首次修改前自动备份为 `settings.yaml.bak-gemini-oauth-bridge`），旧版本部署重启后加载。同时在 `~/.dsh/.credentials.yaml` 里补上占位 key（只追加，不覆盖；无法确认结构的 version-1 文档一律不动并如实报错）。`chat_*`/`tab_*` 内部 ID 会被过滤。在 state 文件中设 `"providerSync": false` 可关闭自动写入。
 - **公开客户端凭据**：OAuth client 凭据是 Antigravity 应用内嵌的公开值（CLIProxyAPI 开源库同样原样公开），仓库中以 base64 形式存放——只为避免 GitHub push protection 的扫描噪声，运行时解码。
 
 ## 局限

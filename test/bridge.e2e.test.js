@@ -286,3 +286,55 @@ test('refresh-models syncs llm-pi-ai.providers.gemini-oauth into settings.yaml',
   assert.equal(readFileSync(settingsPath, 'utf8'), before);
   assert.equal(readFileSync(credPath, 'utf8'), credBefore);
 });
+
+test('refresh-models hot-applies providers through the settings service when available', async () => {
+  const updates = [];
+  let hotHandler = null;
+  const hotServer = http.createServer((req, res) => hotHandler(req, res));
+  apply({
+    webServer: { register(route) { hotHandler = route.handler; return () => {}; } },
+    effect() {},
+    get(name) {
+      if (name !== 'settings') return undefined;
+      return {
+        async update(ns, patch) {
+          updates.push({ ns, patch });
+        },
+      };
+    },
+  });
+  const hotPort = await new Promise((resolve) => {
+    hotServer.listen(0, '127.0.0.1', () => resolve(hotServer.address().port));
+  });
+  try {
+    const res = await fetch(`http://127.0.0.1:${hotPort}/gemini-oauth-bridge/api/refresh-models`, { method: 'POST' });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.ok, true);
+    assert.equal(body.provider.ok, true);
+    assert.equal(body.provider.hotReload, true, 'settings-service sync must report a hot reload');
+    assert.deepEqual(updates, [
+      {
+        ns: 'llm-pi-ai',
+        patch: {
+          providers: {
+            'gemini-oauth': {
+              api: 'openai-completions',
+              baseURL: `http://127.0.0.1:${hotPort}/gemini-oauth-bridge/v1`,
+              apiKeyEnv: 'GEMINI_OAUTH_API_KEY',
+              models: [{ id: 'gemini-3.1-pro-high' }, { id: 'claude-opus-4-6-thinking' }],
+            },
+          },
+        },
+      },
+    ]);
+
+    // the legacy boot-only document is still maintained so the next boot's
+    // legacy import stays consistent with the hot-applied runtime state
+    const legacy = readFileSync(join(fakeHome, '.dsh', 'settings.yaml'), 'utf8');
+    assert.match(legacy, /gemini-oauth:/);
+    assert.match(legacy, new RegExp('baseURL: http://127\\.0\\.0\\.1:' + hotPort + '/gemini-oauth-bridge/v1'));
+  } finally {
+    hotServer.close();
+  }
+});
