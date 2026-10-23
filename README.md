@@ -105,3 +105,20 @@ Test coverage: protocol translation units (OAuth URLs / envelope / stream fragme
 ## License
 
 MIT
+
+## Language (0.3.0)
+
+The Settings section is bilingual (English / Simplified Chinese), using DSH's
+`geminiOauth` locale namespace and framework-injected `t` seat. Change Language in
+Settings → General; every plugin API request sends the active `?lang=zh|en`.
+The root summary page and OpenAI-compatible bridge also accept this parameter.
+Bridge errors with locale descriptors use the resolved language; raw errors,
+status codes, and response envelopes are preserved. A valid explicit language
+wins over `locale.preference` in `$DSH_HOME/settings.yaml` (default home:
+`~/.dsh`); absent or unreadable preferences fall back to Chinese. The OAuth
+callback remembers the language of the login request, since Google's navigation
+does not carry `lang`. Google/upstream text is preserved verbatim. This requires
+DSH's `@deepseek-ai/dsh-client-locale` service, included in the web profile.
+
+Run `npm test` for protocol, HTTP integration, and locale coverage. No build step
+or runtime dependencies are needed.

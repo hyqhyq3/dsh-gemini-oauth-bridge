@@ -107,3 +107,16 @@ node --test test/protocol.test.js test/host.smoke.test.js test/bridge.e2e.test.j
 ## License
 
 MIT
+
+## 语言（0.3.0）
+
+设置界面支持简体中文和英文，使用 DSH 的 `geminiOauth` 语言命名空间和框架注入的
+`t` 席位。在「设置 → 通用」切换语言；插件的每个 API 请求都会发送当前的
+`?lang=zh|en`。根路径摘要页和 OpenAI 兼容桥接端点也接受此参数。
+带语言描述符的桥接错误使用解析后的语言；原始错误、状态码和响应结构保持不变。有效的显式语言优先于
+`$DSH_HOME/settings.yaml` 中的 `locale.preference`（默认目录为 `~/.dsh`）；
+偏好缺失或无法读取时回退到中文。Google 跳转不携带 `lang`，因此 OAuth 回调页
+沿用发起登录时的语言。Google / 上游文本保持原样。需要 web profile 已包含的
+`@deepseek-ai/dsh-client-locale` 服务。
+
+运行 `npm test` 检查协议、HTTP 集成和语言覆盖；无需构建步骤或运行时依赖。
