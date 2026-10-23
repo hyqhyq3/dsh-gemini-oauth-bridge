@@ -17,7 +17,7 @@
 - **订阅额度友好（防风控）**：动态追踪 Antigravity 官方最新客户端版本号用于 User-Agent（版本过旧会被拒绝新模型）；请求信封带 `requestType: "agent"`、稳定派生的 `sessionId`、`agent-<uuid>` 请求 ID；连接复用不发送 `Connection: close`。
 - **429 冷却**：解析上游 Retry-After / retryDelay，按模型进入冷却窗口，冷却期内直接本地返回 429，不硬刷上游。
 - **不做虚假宣传的模型列表**：上游模型目录里标记 `disabled: true` 的条目（例如 `gemini-4-argon-disabled`，`tagTitle: "Unavailable"`、`tagDescription: "Gemini 4 Argon is currently available to Ultra and paid Pro plan subscribers."`）不会被写进 DSH 的模型列表，避免选择器里出现"选了必然失败"的模型；请求此类模型时返回上游自己的说明并提示刷新模型列表，而不是含义不明的 `404 Requested entity was not found`。模型的上下文/输出上限改从上游的 `maxTokens` / `maxOutputTokens` 字段读取。
-- **浏览器信任围栏**：插件的 prefix 路由先于 DSH 自身的 Host/Origin 围栏被派发，因此插件自行实现同样的规则——`Host` 必须是本插件服务的地址（默认仅回环），跨站请求或 `Origin` 与 `Host` 不一致的请求一律 403。
+- **浏览器信任围栏**：插件的 prefix 路由先于 DSH 自身的 Host/Origin 围栏被派发，因此插件自行实现同样的规则——`Host` 必须是本插件服务的地址（默认仅回环），跨站请求、`Origin` 为不透明的 `null`（沙箱 iframe 会这样发）、或 `Origin` 与 `Host` 不一致的请求一律 403；完全不带 `Host` 的请求只接受回环对端（例如进程内合成的请求）。
 - **Token 单飞刷新**：access token 过期前 120 秒自动用 refresh token 续期，并发请求合并为一次刷新。
 
 ## 安装
@@ -70,7 +70,7 @@ llm-pi-ai:
 
 参考 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)（Apache-2.0）的公开实现，协议细节以其抓包结论为准：
 
-- **版本号动态追踪**：每 6 小时从 Antigravity 官方更新 hub 拉取最新版本（请求 UA 用 `electron-builder`，与真实更新器一致），校验数字 semver 后缓存；失败时退回缓存值，再退回兜底 `2.9.1`（Cloud Code 拒绝低于 2.9.0 的客户端使用新模型）。
+- **版本号动态追踪**：从 Antigravity 官方更新 hub 拉取最新版本（请求 UA 用 `electron-builder`，与真实更新器一致），校验数字 semver 后缓存 6 小时——不是定时任务，而是遇到缓存过期后的第一个请求触发刷新；失败时退回缓存值，再退回兜底 `2.9.1`（Cloud Code 拒绝低于 2.9.0 的客户端使用新模型）。
 - **UA 分场景**：generate/stream/loadCodeAssist 用 `antigravity/hub/<版本> darwin/arm64`；onboardUser 追加 ` google-api-nodejs-client/10.3.0`；OAuth token 刷新用 `Go-http-client/2.0`——每个环节与真实客户端一致。
 - **信封语义**：`requestType: "agent"`、`requestId: "agent-<uuid>"`、`userAgent: "antigravity"`、`request.sessionId` 由对话首条消息稳定哈希派生（同一会话不换 session）；删除 `safetySettings`；gemini-3 系剔除 `generationConfig.maxOutputTokens`。
 - **连接指纹**：不发送 `Connection: close`，复用 keep-alive 连接。
@@ -82,7 +82,7 @@ llm-pi-ai:
 ## 安全说明
 
 - OAuth token 存放在 `~/.dsh/gemini-oauth-bridge.json`（mode 0600），任何接口都不会返回 token；`/api/status` 只暴露账号元信息（email、project、tier）与模型列表。
-- DSH 对自身的 `/api/*` 有 Host/Origin 围栏，但插件的 `webServer.register({kind: 'prefix'})` 路由先于该围栏被派发，因此插件自行实现同样规则：`Host` 不是本插件服务的地址、`Sec-Fetch-Site: cross-site`、或 `Origin` 与 `Host` 不一致时一律返回 403。这样可阻断通过 DNS rebinding 读取 `/api/status` 与 `/v1/*`、借 `/v1/chat/completions` 消耗订阅配额，以及对有副作用 POST（`/api/login`、`/api/logout`、`/api/refresh-models`）的盲 CSRF——跨站 `Content-Type: text/plain` 的 POST 无需 CORS 预检，没有围栏时浏览器会照常发出。
+- DSH 对自身的 `/api/*` 有 Host/Origin 围栏，但插件的 `webServer.register({kind: 'prefix'})` 路由先于该围栏被派发，因此插件自行实现同样规则：`Host` 不是本插件服务的地址、`Sec-Fetch-Site: cross-site`、`Origin` 为不透明的 `null`、`Origin` 与 `Host` 不一致，或完全不带 `Host` 且对端不是回环地址时，一律返回 403。这样可阻断通过 DNS rebinding 读取 `/api/status` 与 `/v1/*`、借 `/v1/chat/completions` 消耗订阅配额，以及对有副作用 POST（`/api/login`、`/api/logout`、`/api/refresh-models`）的盲 CSRF——跨站 `Content-Type: text/plain` 的 POST 无需 CORS 预检，没有围栏时浏览器会照常发出。
 - `/v1/*` 默认不鉴权（DSH 需要在本机直接调用）；在 state 文件中设 `"apiKey"` 可要求 `Authorization: Bearer <value>`，设 `"trustedHosts": ["host:port"]` 可服务非回环地址上的 DSH。
 
 ## 局限
