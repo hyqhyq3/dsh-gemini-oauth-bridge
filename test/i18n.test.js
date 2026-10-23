@@ -39,7 +39,10 @@ function host(overrides = {}) {
   subject.apply({ webServer: { register(route) { handler = route.handler; return () => {}; } }, effect() {} });
   async function call(url, method = 'GET', cb = false, payload) {
     let body, status;
-    const res = { writeHead(code) { status = code; return this; }, end(text) { body = text; }, setHeader() {} };
+    // A real http.ServerResponse is a writable stream, so the bridge attaches a
+    // 'close' listener to it to detect a cancelled response. The double has to
+    // offer the same surface, even though it never emits the event.
+    const res = { writeHead(code) { status = code; return this; }, end(text) { body = text; }, setHeader() {}, on() { return this; }, writableEnded: false };
     const req = Object.assign(Readable.from(payload === undefined ? [] : [Buffer.from(JSON.stringify(payload))]), { url, method, headers: {} });
     await (cb ? callback : handler)(req, res);
     return { status, body };

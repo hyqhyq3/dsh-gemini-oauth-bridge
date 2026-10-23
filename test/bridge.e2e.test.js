@@ -3,7 +3,8 @@
 // apiConfig pre-seeded into the isolated HOME's state file.
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, statSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, statSync, existsSync } from 'node:fs';
+import { Readable } from 'node:stream';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import http from 'node:http';
@@ -14,6 +15,10 @@ process.env.HOME = fakeHome;
 // --- boot the mock upstream before anything else runs ---
 
 const upstreamCalls = [];
+// Counts upstream responses that the bridge abandoned mid-flight: the socket
+// closed before the mock finished writing. If a cancelled DSH generation keeps
+// draining the upstream, this stays flat.
+const upstreamAborts = { count: 0 };
 const upstream = http.createServer((req, res) => {
   const chunks = [];
   req.on('data', (c) => chunks.push(c));
@@ -56,6 +61,20 @@ const upstream = http.createServer((req, res) => {
         return;
       }
       const wrap = (gem) => `data: ${JSON.stringify({ response: gem, traceId: 't' })}\n\n`;
+      if (upstream.mode === 'slowstream') {
+        // A long answer the client can walk away from mid-stream.
+        res.on('close', () => {
+          if (!res.writableEnded) upstreamAborts.count += 1;
+        });
+        let sent = 0;
+        const timer = setInterval(() => {
+          if (res.writableEnded || res.destroyed) { clearInterval(timer); return; }
+          res.write(wrap({ candidates: [{ content: { role: 'model', parts: [{ text: 'x' }] } }] }));
+          sent += 1;
+          if (sent >= 200) { clearInterval(timer); res.end('data: [DONE]\n\n'); }
+        }, 20);
+        return;
+      }
       if (upstream.mode === 'tools') {
         res.write(wrap({ candidates: [{ content: { role: 'model', parts: [{ text: 'checking', thought: true }] } }] }));
         res.write(wrap({ candidates: [{ content: { role: 'model', parts: [{ functionCall: { name: 'get_weather', args: { city: 'hz' } }, thoughtSignature: 'SIG-1' }] } }] }));
@@ -89,6 +108,28 @@ const upstream = http.createServer((req, res) => {
       return;
     }
     if (path === '/v1internal:generateContent') {
+      // Bodies that are not a completion: the bridge must not report these as a
+      // successful empty answer.
+      if (upstream.mode === 'garbage') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end('<html>Error 502 (Bad Gateway)!!</html>');
+        return;
+      }
+      if (upstream.mode === 'errorBody') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: { code: 400, message: 'INVALID_ARGUMENT: bad field' } }));
+        return;
+      }
+      if (upstream.mode === 'emptyBody') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end('{}');
+        return;
+      }
+      if (upstream.mode === 'blocked') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ response: { promptFeedback: { blockReason: 'SAFETY' } }, traceId: 't' }));
+        return;
+      }
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(
         JSON.stringify({
@@ -126,10 +167,12 @@ writeFileSync(
 const { apply } = await import('../lib/index.js');
 
 let bridgeServer;
+let bridgeHandler = null;
 const { port } = await new Promise((resolve) => {
   let handler = null;
   bridgeServer = http.createServer((req, res) => handler(req, res));
   apply({ webServer: { register(route) { handler = route.handler; return () => {}; } }, effect() {} });
+  bridgeHandler = handler;
   bridgeServer.listen(0, '127.0.0.1', () => resolve({ port: bridgeServer.address().port }));
 });
 
@@ -378,6 +421,8 @@ test('refresh-models hot-applies providers through the settings service when ava
     hotServer.listen(0, '127.0.0.1', () => resolve(hotServer.address().port));
   });
   try {
+    const legacyPath = join(fakeHome, '.dsh', 'settings.yaml');
+    const legacyBefore = existsSync(legacyPath) ? readFileSync(legacyPath, 'utf8') : null;
     const res = await fetch(`http://127.0.0.1:${hotPort}/gemini-oauth-bridge/api/refresh-models`, { method: 'POST' });
     assert.equal(res.status, 200);
     const body = await res.json();
@@ -400,13 +445,84 @@ test('refresh-models hot-applies providers through the settings service when ava
       },
     ]);
 
-    // the legacy boot-only document is still maintained so the next boot's
-    // legacy import stays consistent with the hot-applied runtime state
-    const legacy = readFileSync(join(fakeHome, '.dsh', 'settings.yaml'), 'utf8');
-    assert.match(legacy, /gemini-oauth:/);
-    assert.match(legacy, new RegExp('baseURL: http://127\\.0\\.0\\.1:' + hotPort + '/gemini-oauth-bridge/v1'));
+    // The legacy boot-only document must be left untouched once the hot path has
+    // succeeded. On DSH ≥ 0.2 the next boot imports that file and renames it
+    // over settings.yaml.imported, so rewriting it would clobber the archived
+    // pre-migration document while changing nothing about the running process.
+    const legacyAfter = existsSync(legacyPath) ? readFileSync(legacyPath, 'utf8') : null;
+    assert.equal(legacyAfter, legacyBefore, 'a successful hot sync must not rewrite the legacy document');
   } finally {
     hotServer.close();
+  }
+});
+
+// ---------- failure reporting on the non-streaming path ----------
+//
+// Every one of these used to answer 200 with `content: null` and
+// `finish_reason: "stop"`, i.e. a silent empty answer the user cannot diagnose.
+
+test('a non-JSON upstream body is reported as an upstream failure, not an empty answer', async (t) => {
+  t.after(() => { upstream.mode = undefined; });
+  upstream.mode = 'garbage';
+  const res = await chat({ model: 'gemini-3.1-pro-high', messages: [{ role: 'user', content: 'hi' }] });
+  assert.equal(res.status, 502);
+  const body = await res.json();
+  assert.match(body.error.message, /non-JSON/);
+  assert.equal(body.error.type, 'api_error');
+});
+
+test('an upstream error envelope keeps its status instead of becoming an empty answer', async (t) => {
+  t.after(() => { upstream.mode = undefined; });
+  upstream.mode = 'errorBody';
+  const res = await chat({ model: 'gemini-3.1-pro-high', messages: [{ role: 'user', content: 'hi' }] });
+  assert.equal(res.status, 400);
+  const body = await res.json();
+  assert.match(body.error.message, /INVALID_ARGUMENT: bad field/);
+});
+
+test('a 200 body with no candidates is an upstream failure, not an empty answer', async (t) => {
+  t.after(() => { upstream.mode = undefined; });
+  upstream.mode = 'emptyBody';
+  const res = await chat({ model: 'gemini-3.1-pro-high', messages: [{ role: 'user', content: 'hi' }] });
+  assert.equal(res.status, 502);
+  const body = await res.json();
+  assert.match(body.error.message, /no candidates/);
+});
+
+test('a safety-blocked prompt reports finish_reason content_filter', async (t) => {
+  t.after(() => { upstream.mode = undefined; });
+  upstream.mode = 'blocked';
+  const res = await chat({ model: 'gemini-3.1-pro-high', messages: [{ role: 'user', content: 'hi' }] });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.choices[0].finish_reason, 'content_filter');
+});
+
+// ---------- cancellation ----------
+
+test('a client disconnect aborts the upstream request instead of draining it', async () => {
+  upstream.mode = 'slowstream';
+  const before = upstreamAborts.count;
+  const controller = new AbortController();
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/gemini-oauth-bridge/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'gemini-3.1-pro-high', stream: true, messages: [{ role: 'user', content: 'hi' }] }),
+      signal: controller.signal,
+    });
+    const reader = res.body.getReader();
+    await reader.read(); // first SSE chunk: the upstream is now mid-answer
+    controller.abort(); // the user hit Esc / closed the tab
+    // The bridge has to abort its own upstream fetch; otherwise the generation
+    // keeps running and burning quota long after the client left.
+    await new Promise((r) => setTimeout(r, 600));
+    assert.ok(
+      upstreamAborts.count > before,
+      `upstream request must be abandoned on client disconnect (aborts stayed at ${before})`,
+    );
+  } finally {
+    upstream.mode = undefined;
   }
 });
 
@@ -485,5 +601,32 @@ test('fence lets DSH server-side provider calls through (no Origin, loopback Hos
     assert.equal(res.status, 200, `loopback authority ${host} must stay reachable`);
     assert.match(res.body, /"object":"list"/);
   }
+});
+
+test('fence refuses a Host-less request from a non-loopback peer', async () => {
+  // A browser always sends Host, so a request without one is either an
+  // in-process/synthetic call or a hand-rolled client. On an exposed bind
+  // (`dsh web --host 10.0.0.7`) that client must not skip the allow-list by
+  // simply omitting the header, so absence is only tolerated from loopback.
+  const direct = (socket) =>
+    new Promise((resolve) => {
+      const req = Object.assign(Readable.from([]), {
+        url: '/gemini-oauth-bridge/api/status',
+        method: 'GET',
+        headers: {},
+        socket,
+      });
+      const res = {
+        writeHead(code) { resolve(code); return this; },
+        end() {},
+        setHeader() {},
+        on() { return this; },
+        writableEnded: false,
+      };
+      bridgeHandler(req, res);
+    });
+  assert.equal(await direct({ remoteAddress: '10.0.0.7' }), 403, 'a remote peer must not reach the API without a Host');
+  assert.equal(await direct({ remoteAddress: '127.0.0.1' }), 200, 'a loopback peer keeps working');
+  assert.equal(await direct(undefined), 200, 'an in-process request has no transport to trust either way');
 });
 
