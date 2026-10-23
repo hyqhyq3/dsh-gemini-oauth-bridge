@@ -471,7 +471,7 @@ test('history translation re-attaches thoughtSignature via opts.getSignature', (
 
 // ---------- tier resolution & model catalog parsing ----------
 
-import { resolveTier, parseAvailableModels } from '../lib/protocol.js';
+import { resolveTier, parseAvailableModels, isTrustedAuthority } from '../lib/protocol.js';
 
 test('resolveTier prefers the paid subscription tier over currentTier', () => {
   assert.equal(resolveTier({ paidTier: { id: 'g1-pro-tier', name: 'Google AI Pro' }, currentTier: { id: 'free-tier' } }), 'g1-pro-tier');
@@ -492,13 +492,79 @@ test('parseAvailableModels normalizes map and array shapes', () => {
   assert.deepEqual(map.ids, ['gemini-3.1-pro-low', 'claude-opus-4-6-thinking']);
   assert.deepEqual(map.caps['gemini-3.1-pro-low'], { contextLength: 1000000, maxCompletionTokens: 65536 });
   assert.ok(!('claude-opus-4-6-thinking' in map.caps));
+  assert.deepEqual(map.unavailable, {});
 
   const arr = parseAvailableModels({ models: ['a', { id: 'b', context_length: 8 }, { name: 'c' }] });
   assert.deepEqual(arr.ids, ['a', 'b', 'c']);
   assert.deepEqual(arr.caps.b, { contextLength: 8 });
+  assert.deepEqual(arr.unavailable, {});
 
-  assert.deepEqual(parseAvailableModels({}), { ids: [], caps: {} });
-  assert.deepEqual(parseAvailableModels(null), { ids: [], caps: {} });
+  assert.deepEqual(parseAvailableModels({}), { ids: [], caps: {}, unavailable: {} });
+  assert.deepEqual(parseAvailableModels(null), { ids: [], caps: {}, unavailable: {} });
+});
+
+// The two upstream quirks this guards against were both observed live: a model
+// the account cannot use is still advertised but flagged `disabled`, and the
+// limits are spelled `maxTokens`/`maxOutputTokens` (not the camelCase variants
+// the parser used to look for, which left caps permanently empty).
+test('parseAvailableModels drops disabled models and reads maxTokens/maxOutputTokens', () => {
+  const parsed = parseAvailableModels({
+    models: {
+      'gemini-3.8-flash-high': {
+        displayName: 'Gemini 3.8 Flash (High)',
+        maxTokens: 1048576,
+        maxOutputTokens: 65536,
+        model: 'MODEL_PLACEHOLDER_M318',
+      },
+      'gemini-4-argon-disabled': {
+        displayName: 'Gemini 4 Argon',
+        disabled: true,
+        tagTitle: 'Unavailable',
+        tagDescription: 'Gemini 4 Argon is currently available to Ultra and paid Pro plan subscribers.',
+        model: 'MODEL_PLACEHOLDER_M421',
+      },
+    },
+  });
+
+  assert.deepEqual(parsed.ids, ['gemini-3.8-flash-high'], 'a disabled model must never be advertised');
+  assert.deepEqual(parsed.caps['gemini-3.8-flash-high'], { contextLength: 1048576, maxCompletionTokens: 65536 });
+  assert.ok(!('gemini-4-argon-disabled' in parsed.caps));
+  assert.equal(
+    parsed.unavailable['gemini-4-argon-disabled'],
+    'Gemini 4 Argon is currently available to Ultra and paid Pro plan subscribers.',
+  );
+});
+
+test('parseAvailableModels treats available:false as unavailable and falls back to tagTitle', () => {
+  const parsed = parseAvailableModels({
+    models: {
+      'gone-model': { available: false, tagTitle: 'Unavailable' },
+      'ok-model': { available: true, max_tokens: 4096 },
+    },
+  });
+  assert.deepEqual(parsed.ids, ['ok-model']);
+  assert.equal(parsed.unavailable['gone-model'], 'Unavailable');
+  assert.deepEqual(parsed.caps['ok-model'], { contextLength: 4096 });
+});
+
+// ---------- browser-trust fence: authority rule ----------
+
+test('isTrustedAuthority accepts loopback only, unless explicitly allow-listed', () => {
+  for (const host of ['127.0.0.1:3080', '127.0.0.1', 'localhost:3080', 'LOCALHOST:3080', '[::1]:3080', ' 127.0.0.1:3080 ']) {
+    assert.equal(isTrustedAuthority(host, []), true, `${host} must be trusted`);
+  }
+  // a hostname that merely starts with, or embeds, a loopback literal is not
+  // loopback — this is the DNS-rebinding case the fence exists for
+  for (const host of ['evil.example', '127.0.0.1.evil.com', 'evil.com:3080', 'notlocalhost:3080']) {
+    assert.equal(isTrustedAuthority(host, []), false, `${host} must be refused`);
+  }
+  for (const host of [undefined, null, '', '   ']) {
+    assert.equal(isTrustedAuthority(host, []), false);
+  }
+  // non-loopback deployments opt in explicitly
+  assert.equal(isTrustedAuthority('dsh.lan:3080', ['dsh.lan:3080']), true);
+  assert.equal(isTrustedAuthority('dsh.lan:3080', ['other.lan:3080']), false);
+  assert.equal(isTrustedAuthority('dsh.lan:3080', 'not-an-array'), false);
 });
 
 // ---------- settings.yaml surgical merge ----------

@@ -16,6 +16,8 @@
 - **Gemini 3 thought signature 回放**：服务端按 tool_call id 记住上游下发的 thoughtSignature，下一轮请求自动附回 functionCall part——OpenAI 格式本身不携带签名，这是多轮工具调用不报错的必要机制。
 - **订阅额度友好（防风控）**：动态追踪 Antigravity 官方最新客户端版本号用于 User-Agent（版本过旧会被拒绝新模型）；请求信封带 `requestType: "agent"`、稳定派生的 `sessionId`、`agent-<uuid>` 请求 ID；连接复用不发送 `Connection: close`。
 - **429 冷却**：解析上游 Retry-After / retryDelay，按模型进入冷却窗口，冷却期内直接本地返回 429，不硬刷上游。
+- **不做虚假宣传的模型列表**：上游模型目录里标记 `disabled: true` 的条目（例如 `gemini-4-argon-disabled`，`tagTitle: "Unavailable"`、`tagDescription: "Gemini 4 Argon is currently available to Ultra and paid Pro plan subscribers."`）不会被写进 DSH 的模型列表，避免选择器里出现"选了必然失败"的模型；请求此类模型时返回上游自己的说明并提示刷新模型列表，而不是含义不明的 `404 Requested entity was not found`。模型的上下文/输出上限改从上游的 `maxTokens` / `maxOutputTokens` 字段读取。
+- **浏览器信任围栏**：插件的 prefix 路由先于 DSH 自身的 Host/Origin 围栏被派发，因此插件自行实现同样的规则——`Host` 必须是本插件服务的地址（默认仅回环），跨站请求或 `Origin` 与 `Host` 不一致的请求一律 403。
 - **Token 单飞刷新**：access token 过期前 120 秒自动用 refresh token 续期，并发请求合并为一次刷新。
 
 ## 安装
@@ -57,6 +59,9 @@ llm-pi-ai:
 | `tokens` | access/refresh token 与过期时间 |
 | `email` / `project` / `tier` | 登录账号与注册结果 |
 | `models` | 上游模型列表缓存（UI 里可手动刷新） |
+| `modelCaps` | 从上游目录读取的每模型 `contextLength` / `maxCompletionTokens` |
+| `modelsUnavailable` | 上游标记为 `disabled` 的模型 ID 及其上游说明；请求这些模型时会把该说明展示出来 |
+| `trustedHosts` | 浏览器信任围栏额外接受的 `host:port` 授权列表（供非回环部署使用）；回环地址始终被接受 |
 | `signatures` | thoughtSignature 回放缓存（按 tool_call id，上限 800 条） |
 | `apiKey` | 可选：给桥接端点加本机鉴权 |
 | `apiConfig` | 可选：覆盖上游端点（`generateBase` / `loadBase` / `onboardBase`），默认与 CLIProxyAPI 一致：生成走 daily、注册走 prod |
@@ -74,12 +79,19 @@ llm-pi-ai:
 - **provider 自动配置**：登录成功和「刷新模型列表」时，自动写入 `llm-pi-ai.providers.gemini-oauth` 路由（含最新模型 ID 和 `GEMINI_OAUTH_API_KEY` 凭据引用）。DSH 提供设置服务时走官方 Models 页面同款路径——变更即时热生效并持久化到活跃 profile 的 `cordis.patch.yml`，只动 gemini-oauth 这一个路由，且由适配器自身的 schema 校验、失败自动回滚；同时保留对遗留 `~/.dsh/settings.yaml` 的同步写入（外科手术式合并，首次修改前自动备份为 `settings.yaml.bak-gemini-oauth-bridge`），旧版本部署重启后加载。同时在 `~/.dsh/.credentials.yaml` 里补上占位 key（只追加，不覆盖；无法确认结构的 version-1 文档一律不动并如实报错）。`chat_*`/`tab_*` 内部 ID 会被过滤。在 state 文件中设 `"providerSync": false` 可关闭自动写入。
 - **公开客户端凭据**：OAuth client 凭据是 Antigravity 应用内嵌的公开值（CLIProxyAPI 开源库同样原样公开），仓库中以 base64 形式存放——只为避免 GitHub push protection 的扫描噪声，运行时解码。
 
+## 安全说明
+
+- OAuth token 存放在 `~/.dsh/gemini-oauth-bridge.json`（mode 0600），任何接口都不会返回 token；`/api/status` 只暴露账号元信息（email、project、tier）与模型列表。
+- DSH 对自身的 `/api/*` 有 Host/Origin 围栏，但插件的 `webServer.register({kind: 'prefix'})` 路由先于该围栏被派发，因此插件自行实现同样规则：`Host` 不是本插件服务的地址、`Sec-Fetch-Site: cross-site`、或 `Origin` 与 `Host` 不一致时一律返回 403。这样可阻断通过 DNS rebinding 读取 `/api/status` 与 `/v1/*`、借 `/v1/chat/completions` 消耗订阅配额，以及对有副作用 POST（`/api/login`、`/api/logout`、`/api/refresh-models`）的盲 CSRF——跨站 `Content-Type: text/plain` 的 POST 无需 CORS 预检，没有围栏时浏览器会照常发出。
+- `/v1/*` 默认不鉴权（DSH 需要在本机直接调用）；在 state 文件中设 `"apiKey"` 可要求 `Authorization: Bearer <value>`，设 `"trustedHosts": ["host:port"]` 可服务非回环地址上的 DSH。
+
 ## 局限
 
 - **非官方用法**：依赖 Antigravity 客户端的公开 OAuth client 凭据与非公开 `v1internal` 接口，Google 可能随时变更或限制；仅供个人订阅者自用。
 - 单账号（不做多账号轮询）；`http(s)://` 图片 URL 不支持（仅 data URL 内联）；会话重启后 thoughtSignature 缓存仍在（持久化），但超过 800 条会 LRU 淘汰。
 - 登录回调固定占用 `127.0.0.1:51121`；与 Antigravity 桌面客户端同时登录可能端口冲突。
 - 上游为 `daily-cloudcode-pa` 通道（与 CLIProxyAPI 默认一致）；如需切换可通过 `apiConfig` 覆盖。
+- **目录里有模型但无法生成**：上游会列出对本账号不提供服务的条目——Gemini 4 Argon 系列只以 `gemini-4-argon-disabled` 出现，带 `disabled: true`、`tagTitle: "Unavailable"`、`tagDescription: "Gemini 4 Argon is currently available to Ultra and paid Pro plan subscribers."`，且所有 ID 变体都返回 `404 NOT_FOUND`（实测即使在付费 `g1-pro-tier`（Google AI Pro）账号上也是如此）。因此在目录里 ≠ 可用；插件会隐藏 `disabled` 条目，但客户端无法把这类模型"打开"。
 
 ## 开发
 

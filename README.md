@@ -14,6 +14,8 @@ Bridges a **Google AI subscription** (AI Pro / AI Ultra, via the Antigravity / C
 - **Gemini 3 thought-signature replay**: the server remembers upstream `thoughtSignature` values by tool-call id and re-attaches them to functionCall parts on the next turn — OpenAI format carries no signatures, and Gemini 3 multi-turn tool calls fail without replay.
 - **Subscription-friendly (anti-drift)**: dynamically tracks the latest shipping Antigravity client version for the User-Agent (stale versions are rejected for newer models); requests carry `requestType: "agent"`, a stable derived `sessionId`, and `agent-<uuid>` request IDs; keep-alive connections without `Connection: close`.
 - **429 cooldowns**: parses upstream `Retry-After` / `retryDelay`, enters a per-model cooldown window, and refuses requests locally during it instead of hammering upstream.
+- **Catalog honesty**: an entry the upstream catalog flags `disabled: true` — e.g. `gemini-4-argon-disabled` ("Unavailable" / "available to Ultra and paid Pro plan subscribers") — is never published as a DSH model, so the picker cannot offer something that can only fail. A request for an id the account cannot use returns the upstream's own explanation plus a refresh hint instead of an opaque `404 Requested entity was not found`. Per-model context/output limits are read from the upstream `maxTokens` / `maxOutputTokens` fields.
+- **Browser-trust fence**: a plugin prefix route is dispatched *before* DSH's own Host/Origin fence, so the bridge enforces its own — the `Host` must be an authority it serves (loopback by default), and a `Sec-Fetch-Site: cross-site` request or an `Origin` that disagrees with the `Host` is refused with 403.
 - **Single-flight token refresh**: access tokens auto-renew 120 s before expiry; concurrent requests share one refresh.
 
 ## Install
@@ -55,6 +57,9 @@ llm-pi-ai:
 | `tokens` | access/refresh tokens and expiry |
 | `email` / `project` / `tier` | login account and registration result |
 | `models` | upstream model cache (refreshable from the UI) |
+| `modelCaps` | per-model `contextLength` / `maxCompletionTokens` read from the upstream catalog |
+| `modelsUnavailable` | ids the upstream catalog marks `disabled`, with the upstream explanation shown when such a model is requested |
+| `trustedHosts` | extra `host:port` authorities the browser-trust fence accepts (for non-loopback deployments); loopback is always accepted |
 | `signatures` | thoughtSignature replay cache (by tool-call id, cap 800) |
 | `apiKey` | optional local auth for the bridge endpoint |
 | `apiConfig` | optional upstream overrides (`generateBase` / `loadBase` / `onboardBase`); defaults match CLIProxyAPI: generation via daily, registration via prod |
@@ -72,12 +77,19 @@ Protocol details follow the public implementation in [CLIProxyAPI](https://githu
 - **Automatic provider configuration**: on login and on 刷新模型列表 (refresh models), the `llm-pi-ai.providers.gemini-oauth` route (with the latest model ids and the `GEMINI_OAUTH_API_KEY` credential reference) is written through the DSH settings service when available — the same path the Models page uses — so the change hot-applies to the running process and persists into the active profile's `cordis.patch.yml`; only the gemini-oauth route is touched and the edit is validated by the adapter's own schema. A fallback keeps the legacy `~/.dsh/settings.yaml` document in sync (surgical merge, one-time backup at `settings.yaml.bak-gemini-oauth-bridge`), which older deployments still load at boot. The matching placeholder key is provisioned in `~/.dsh/.credentials.yaml` (append-only; a version-1 document whose shape cannot be proven is left untouched and reported instead). Internal `chat_*`/`tab_*` ids are filtered out. Set `"providerSync": false` in the state file to opt out.
 - **Public client credentials**: the OAuth client credentials are public values embedded in the Antigravity app (published verbatim in CLIProxyAPI's repo); they are stored base64-encoded in this repository only to keep GitHub push protection quiet, and decoded at runtime.
 
+## Security
+
+- OAuth tokens live in `~/.dsh/gemini-oauth-bridge.json` (mode 0600) and are never returned by any endpoint; `/api/status` exposes only account metadata (email, project, tier) and the model list.
+- DSH applies a Host/Origin fence to its own `/api/*` routes, but a plugin `webServer.register({kind: 'prefix'})` route is dispatched before that fence, so the bridge enforces the same rules itself: a request is refused with 403 when its `Host` is not an authority the bridge serves, when `Sec-Fetch-Site: cross-site`, or when `Origin` disagrees with `Host`. This blocks DNS-rebinding reads of `/api/status` and `/v1/*`, quota-burning calls through `/v1/chat/completions`, and blind-CSRF of the mutating POSTs (`/api/login`, `/api/logout`, `/api/refresh-models`) — a cross-site `Content-Type: text/plain` POST needs no CORS preflight, so without the fence the browser would deliver it.
+- `/v1/*` is unauthenticated by default because DSH calls it locally; set `"apiKey"` in the state file to require `Authorization: Bearer <value>`, and `"trustedHosts": ["host:port"]` to serve DSH on a non-loopback address.
+
 ## Limitations
 
 - **Unofficial usage**: relies on the Antigravity client's public OAuth credentials and a non-public `v1internal` surface; Google may change or restrict it at any time. Intended for individual subscribers' own use.
 - Single account (no rotation); `http(s)://` image URLs unsupported (data URLs only); the signature cache is persisted but LRU-evicts past 800 entries.
 - The login callback occupies `127.0.0.1:51121`; logging in while the Antigravity desktop app is also logging in may conflict.
 - Generation goes to the `daily-cloudcode-pa` channel (matching CLIProxyAPI's default); override via `apiConfig` if needed.
+- **Some catalog models cannot generate.** Upstream advertises entries it will not serve for your account — the Gemini 4 Argon family appears only as `gemini-4-argon-disabled` with `disabled: true`, `tagTitle: "Unavailable"` and `tagDescription: "Gemini 4 Argon is currently available to Ultra and paid Pro plan subscribers."`, and every id variant returns `404 NOT_FOUND` even on a paid `g1-pro-tier` (Google AI Pro) account. Catalog membership is therefore not proof that a model can generate; the plugin hides `disabled` entries, but no client-side change can enable them.
 
 ## Development
 

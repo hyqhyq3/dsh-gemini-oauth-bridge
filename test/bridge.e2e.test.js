@@ -27,6 +27,13 @@ const upstream = http.createServer((req, res) => {
       body,
     });
     if (path === '/v1internal:streamGenerateContent') {
+      if (upstream.mode === 'model404' || upstream.mode === 'plain404') {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(upstream.mode === 'model404'
+          ? { error: { code: 404, message: 'Requested entity was not found.', status: 'NOT_FOUND' } }
+          : { error: { code: 404, message: 'routing miss' } }));
+        return;
+      }
       if (upstream.mode === '429') {
         res.writeHead(429, { 'Content-Type': 'application/json', 'Retry-After': '1' });
         res.end(JSON.stringify({ error: { code: 429, message: 'quota', details: [{ retryDelay: '30s' }] } }));
@@ -64,10 +71,19 @@ const upstream = http.createServer((req, res) => {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
         models: {
-          'gemini-3.1-pro-high': { displayName: 'Gemini 3.1 Pro (High)', maxCompletionTokens: 65536 },
+          // limits in the upstream spelling; a parser reading only the legacy
+          // camelCase aliases used to leave modelCaps permanently empty
+          'gemini-3.1-pro-high': { displayName: 'Gemini 3.1 Pro (High)', maxTokens: 1048576, maxOutputTokens: 65536 },
           'claude-opus-4-6-thinking': { displayName: 'Claude Opus 4.6 (Thinking)' },
           'chat_20706': {},
           'tab_flash_lite_preview': {},
+          // account may not use it: must never reach the provider model list
+          'gemini-4-argon-disabled': {
+            displayName: 'Gemini 4 Argon',
+            disabled: true,
+            tagTitle: 'Unavailable',
+            tagDescription: 'Gemini 4 Argon is currently available to Ultra and paid Pro plan subscribers.',
+          },
         },
       }));
       return;
@@ -268,6 +284,26 @@ test('refresh-models syncs llm-pi-ai.providers.gemini-oauth into settings.yaml',
   assert.match(text, new RegExp('llm-pi-ai:\\n  providers:\\n    gemini-oauth:\\n      api: openai-completions\\n      baseURL: http://127\\.0\\.0\\.1:' + port + '/gemini-oauth-bridge/v1\\n      apiKeyEnv: GEMINI_OAUTH_API_KEY\\n      models:\\n        - id: gemini-3\\.1-pro-high\\n        - id: claude-opus-4-6-thinking\\n$'));
   assert.ok(!text.includes('chat_20706'));
   assert.ok(!text.includes('tab_flash_lite_preview'));
+  // an upstream-`disabled` model is advertised by the catalog but unusable; it
+  // must not reach the provider list (this is what put gemini-4-argon-* in the
+  // DSH picker, where every request could only ever 404)
+  assert.ok(!text.includes('gemini-4-argon-disabled'), 'disabled upstream model must not be published');
+  assert.ok(!body.models.includes('gemini-4-argon-disabled'));
+
+  // caps now come from the upstream spellings (maxTokens / maxOutputTokens)
+  const persisted = JSON.parse(readFileSync(join(fakeHome, '.dsh', 'gemini-oauth-bridge.json'), 'utf8'));
+  assert.deepEqual(persisted.modelCaps['gemini-3.1-pro-high'], { contextLength: 1048576, maxCompletionTokens: 65536 });
+  assert.equal(
+    persisted.modelsUnavailable['gemini-4-argon-disabled'],
+    'Gemini 4 Argon is currently available to Ultra and paid Pro plan subscribers.',
+  );
+
+  // the reason is exposed to the settings page as well
+  const status = await (await fetch(`http://127.0.0.1:${port}/gemini-oauth-bridge/api/status`)).json();
+  assert.equal(
+    status.unavailableModels['gemini-4-argon-disabled'],
+    'Gemini 4 Argon is currently available to Ultra and paid Pro plan subscribers.',
+  );
 
   // DSH refuses a provider with no credential: the fixed placeholder key must
   // land in .credentials.yaml, 0600 (the loader rejects a looser mode).
@@ -285,6 +321,41 @@ test('refresh-models syncs llm-pi-ai.providers.gemini-oauth into settings.yaml',
   assert.equal((await res2.json()).provider.credential.created, false);
   assert.equal(readFileSync(settingsPath, 'utf8'), before);
   assert.equal(readFileSync(credPath, 'utf8'), credBefore);
+});
+
+test('an upstream 404 NOT_FOUND names the model and the upstream reason', async () => {
+  // load the disabled-model reasons into state first (order-independent)
+  await fetch(`http://127.0.0.1:${port}/gemini-oauth-bridge/api/refresh-models`, { method: 'POST' });
+
+  upstream.mode = 'model404';
+  try {
+    const res = await chat({ model: 'gemini-4-argon-disabled', stream: true, messages: [{ role: 'user', content: 'hi' }] });
+    assert.equal(res.status, 404);
+    const json = await res.json();
+    assert.equal(json.error.code, 'model_not_found');
+    assert.match(json.error.message, /gemini-4-argon-disabled/);
+    // the upstream's own entitlement reason is carried through
+    assert.match(json.error.message, /Ultra and paid Pro plan subscribers/);
+    assert.match(json.error.message, /刷新模型列表/);
+    // Google's opaque wording must not be the whole answer
+    assert.ok(!/^upstream 404/.test(json.error.message));
+  } finally {
+    upstream.mode = undefined;
+  }
+});
+
+test('a 404 that is not NOT_FOUND still reports as a transport error', async () => {
+  upstream.mode = 'plain404';
+  try {
+    // its own model id: gemini-3-pro carries a cooldown from the 429 test above
+    const res = await chat({ model: 'plain-404-probe', stream: true, messages: [{ role: 'user', content: 'hi' }] });
+    assert.equal(res.status, 404);
+    const json = await res.json();
+    assert.equal(json.error.code, 'upstream');
+    assert.match(json.error.message, /upstream 404/);
+  } finally {
+    upstream.mode = undefined;
+  }
 });
 
 test('refresh-models hot-applies providers through the settings service when available', async () => {
@@ -338,3 +409,81 @@ test('refresh-models hot-applies providers through the settings service when ava
     hotServer.close();
   }
 });
+
+// ---------- browser-trust fence ----------
+//
+// DSH's own fence covers its `/api/*` routes, but a plugin prefix route is
+// dispatched before it, so the bridge enforces the same rules itself. These
+// requests set the Host header explicitly, which `fetch` refuses to do.
+
+function rawRequest({ path, method = 'GET', host, headers = {} }) {
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      { host: '127.0.0.1', port, path, method, headers: { ...(host ? { Host: host } : {}), ...headers } },
+      (res) => {
+        let body = '';
+        res.on('data', (c) => (body += c));
+        res.on('end', () => resolve({ status: res.statusCode, body }));
+      },
+    );
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+test('fence refuses a foreign Host (DNS rebinding) on the JSON API', async () => {
+  const res = await rawRequest({ path: '/gemini-oauth-bridge/api/status', host: 'evil.example' });
+  assert.equal(res.status, 403);
+  assert.match(res.body, /untrusted Host/);
+  // the account metadata must not leak
+  assert.ok(!res.body.includes('@'), 'no email may be returned');
+});
+
+test('fence refuses a cross-site request even with a loopback Host', async () => {
+  const res = await rawRequest({
+    path: '/gemini-oauth-bridge/v1/models',
+    host: `127.0.0.1:${port}`,
+    headers: { Origin: 'https://evil.example', 'Sec-Fetch-Site': 'cross-site' },
+  });
+  assert.equal(res.status, 403);
+  assert.match(res.body, /cross-site request|Origin does not match Host/);
+});
+
+test('fence refuses an Origin that disagrees with the Host', async () => {
+  const res = await rawRequest({
+    path: '/gemini-oauth-bridge/api/status',
+    host: `127.0.0.1:${port}`,
+    headers: { Origin: 'https://evil.example', 'Sec-Fetch-Site': 'same-site' },
+  });
+  assert.equal(res.status, 403);
+  assert.match(res.body, /Origin does not match Host/);
+});
+
+test('fence refuses a cross-site simple POST (would need no CORS preflight)', async () => {
+  const res = await rawRequest({
+    path: '/gemini-oauth-bridge/api/refresh-models',
+    method: 'POST',
+    host: 'evil.example',
+    headers: { 'Content-Type': 'text/plain', 'Sec-Fetch-Site': 'cross-site' },
+  });
+  assert.equal(res.status, 403, 'a blind CSRF POST must never reach the handler');
+});
+
+test('fence lets the settings page through (same-origin loopback)', async () => {
+  const res = await rawRequest({
+    path: '/gemini-oauth-bridge/api/status',
+    host: `127.0.0.1:${port}`,
+    headers: { Origin: `http://127.0.0.1:${port}`, 'Sec-Fetch-Site': 'same-origin' },
+  });
+  assert.equal(res.status, 200);
+  assert.match(res.body, /"ok":true/);
+});
+
+test('fence lets DSH server-side provider calls through (no Origin, loopback Host)', async () => {
+  for (const host of [`127.0.0.1:${port}`, `localhost:${port}`]) {
+    const res = await rawRequest({ path: '/gemini-oauth-bridge/v1/models', host });
+    assert.equal(res.status, 200, `loopback authority ${host} must stay reachable`);
+    assert.match(res.body, /"object":"list"/);
+  }
+});
+
