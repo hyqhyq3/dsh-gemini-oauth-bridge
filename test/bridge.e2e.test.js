@@ -45,6 +45,14 @@ const upstream = http.createServer((req, res) => {
         return;
       }
       res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      // 200-with-nothing: the shapes that used to close as an empty success
+      if (upstream.mode === 'ssedone') { res.end('data: [DONE]\n\n'); return; }
+      if (upstream.mode === 'sseempty') { res.end(); return; }
+      if (upstream.mode === 'sseerror') {
+        res.write(`data: ${JSON.stringify({ error: { code: 500, message: 'stream blew up mid-flight' } })}\n\n`);
+        res.end('data: [DONE]\n\n');
+        return;
+      }
       if (upstream.mode === 'fragment') {
         // dribble the SSE payload 3 bytes at a time to exercise line buffering
         const events = [
@@ -123,6 +131,11 @@ const upstream = http.createServer((req, res) => {
       if (upstream.mode === 'emptyBody') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end('{}');
+        return;
+      }
+      if (upstream.mode === 'emptyCandidates') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ response: { candidates: [] } }));
         return;
       }
       if (upstream.mode === 'blocked') {
@@ -487,6 +500,42 @@ test('a 200 body with no candidates is an upstream failure, not an empty answer'
   assert.equal(res.status, 502);
   const body = await res.json();
   assert.match(body.error.message, /no candidates/);
+});
+
+test('a 200 body with an empty candidates array is an upstream failure too', async (t) => {
+  t.after(() => { upstream.mode = undefined; });
+  upstream.mode = 'emptyCandidates';
+  const res = await chat({ model: 'gemini-3.1-pro-high', messages: [{ role: 'user', content: 'hi' }] });
+  assert.equal(res.status, 502);
+  assert.match((await res.json()).error.message, /no candidates/);
+});
+
+test('a stream that never produces a completion is reported instead of a silent 200', async (t) => {
+  t.after(() => { upstream.mode = undefined; });
+  // All three are 200 responses carrying no usable SSE payload. Headers are
+  // written lazily now, so the bridge can still answer with a real status.
+  for (const [mode, expected] of [
+    ['ssedone', /before producing a completion/],
+    ['sseempty', /before producing a completion/],
+    ['sseerror', /stream blew up mid-flight/],
+  ]) {
+    upstream.mode = mode;
+    const res = await chat({ model: 'gemini-3.1-pro-high', stream: true, messages: [{ role: 'user', content: 'hi' }] });
+    assert.equal(res.status, 502, `${mode} must not be answered as a successful stream`);
+    const body = await res.json();
+    assert.equal(body.error.type, 'api_error');
+    assert.match(body.error.message, expected);
+  }
+});
+
+test('a normal stream still opens with 200 and terminates with [DONE]', async (t) => {
+  t.after(() => { upstream.mode = undefined; });
+  const res = await chat({ model: 'gemini-3.1-pro-high', stream: true, messages: [{ role: 'user', content: 'hi' }] });
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get('content-type'), /text\/event-stream/);
+  const text = await res.text();
+  assert.match(text, /chat\.completion\.chunk/);
+  assert.match(text, /data: \[DONE\]/);
 });
 
 test('a safety-blocked prompt reports finish_reason content_filter', async (t) => {
