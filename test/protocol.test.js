@@ -111,13 +111,45 @@ test('tool_calls and tool results translate into functionCall/functionResponse',
   assert.equal(toolNameByCallId.get('call_1'), 'get_weather');
   const modelTurn = request.contents[1];
   assert.equal(modelTurn.role, 'model');
-  assert.deepEqual(modelTurn.parts[0].functionCall, { name: 'get_weather', args: { city: 'hangzhou' } });
+  assert.deepEqual(modelTurn.parts[0].functionCall, { id: 'call_1', name: 'get_weather', args: { city: 'hangzhou' } });
   const toolTurn = request.contents[2];
   assert.equal(toolTurn.role, 'user');
   assert.deepEqual(toolTurn.parts[0].functionResponse, {
+    id: 'call_1',
     name: 'get_weather',
     response: { result: '{"temp":30}' },
   });
+});
+
+test('consecutive tool results coalesce into one user turn and upstream functionCall.id is preserved', () => {
+  const { request } = openaiToGeminiRequest({
+    messages: [
+      { role: 'user', content: 'run two tools' },
+      {
+        role: 'assistant',
+        content: null,
+        tool_calls: [
+          { id: 'toolu_vrtx_1', type: 'function', function: { name: 't1', arguments: '{"x":1}' } },
+          { id: 'toolu_vrtx_2', type: 'function', function: { name: 't2', arguments: '{"y":2}' } },
+        ],
+      },
+      { role: 'tool', tool_call_id: 'toolu_vrtx_1', content: 'r1' },
+      { role: 'tool', tool_call_id: 'toolu_vrtx_2', content: 'r2' },
+    ],
+  });
+  assert.equal(request.contents.length, 3);
+  assert.equal(request.contents[2].role, 'user');
+  assert.deepEqual(request.contents[2].parts, [
+    { functionResponse: { id: 'toolu_vrtx_1', name: 't1', response: { result: 'r1' } } },
+    { functionResponse: { id: 'toolu_vrtx_2', name: 't2', response: { result: 'r2' } } },
+  ]);
+
+  const st = freshTranslateState({ stream: false, idSeed: 's' });
+  geminiToOpenaiFragments(
+    { candidates: [{ finishReason: 'STOP', content: { role: 'model', parts: [{ functionCall: { id: 'toolu_vrtx_abc', name: 't1', args: {} } }] } }] },
+    st,
+  );
+  assert.equal(st.toolCalls[0].id, 'toolu_vrtx_abc');
 });
 
 test('data-url images become inline_data; http urls degrade to text', () => {
