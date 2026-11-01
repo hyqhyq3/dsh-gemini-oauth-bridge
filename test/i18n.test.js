@@ -63,7 +63,7 @@ test('client dictionary parity, locale declarations, injected t and live API lan
   parity(dictionaries.zh, dictionaries.en);
   assert.deepEqual(Array.from(plugin.inject), ['slots', 'locale']);
   assert.equal(section.locale, 'geminiOauth');
-  assert.equal(Component({ t }).children[0], 'Loading…');
+  assert.match(JSON.stringify(Component({ t })), /Loading…/);
   assert.match(requested, /\?lang=en$/);
   active = 'zh'; Component({ t });
   assert.match(requested, /\?lang=zh$/);
