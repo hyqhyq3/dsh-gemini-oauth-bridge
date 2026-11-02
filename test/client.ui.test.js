@@ -8,6 +8,11 @@ import fs from 'node:fs';
 
 const clientSource = fs.readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8');
 
+// The section reads its data through useState, so a test that wants a non-loading
+// render queues the hook values the component will receive, in call order:
+// status, busy, notice, loginFailed, attempt.
+let hookQueue = null;
+
 function loadClient() {
   let pluginId;
   let plugin;
@@ -36,6 +41,7 @@ function loadClient() {
       return { type, props: props ?? {}, children };
     },
     useState(initial) {
+      if (hookQueue && hookQueue.length) return [hookQueue.shift(), () => {}];
       return [initial, () => {}];
     },
     useEffect() {},
@@ -157,7 +163,7 @@ test('zh and en dictionaries keep identical keys and placeholders', () => {
     assert.ok(key in zh, key);
     assert.ok(key in en, key);
   }
-  for (const key of ['stateSignedIn', 'stateSignedOut', 'statePending', 'stateLoading', 'stateError', 'hintSignedIn', 'hintSignedOut', 'hintPending', 'retry', 'configuration', 'factConfigurationLive', 'factConfigurationRestart', 'factConfigurationPending', 'factConfigurationFailed', 'howToTitle', 'howToIntro']) {
+  for (const key of ['stateSignedIn', 'stateSignedOut', 'statePending', 'stateLoading', 'stateError', 'hintSignedIn', 'hintSignedOut', 'hintPending', 'retry', 'configuration', 'factConfigurationLive', 'factConfigurationRestart', 'factConfigurationPending', 'factConfigurationDisabled', 'factConfigurationFailed', 'howToTitle', 'howToIntro']) {
     assert.ok(key in zh, key);
     assert.ok(key in en, key);
   }
@@ -177,3 +183,62 @@ test('loading state renders the native section shell without actions', () => {
   assert.match(json, /Loading…/);
   assert.doesNotMatch(json, /Sign in with Google|Refresh model list|Retry/);
 });
+
+const signedInStatus = {
+  ok: true,
+  loggedIn: true,
+  email: 'user@example.com',
+  project: 'project-1',
+  tier: 'paid',
+  models: ['gemini-3-pro'],
+  modelSource: 'upstream',
+  version: '1.2.3',
+  versionSource: 'manifest',
+  loginPending: false,
+  providerSync: { at: 1, models: 1, host: '127.0.0.1:3080', hotReload: true },
+  cooldowns: {},
+};
+
+function renderStatus(component, dictionaries, status) {
+  const t = (key, params) => {
+    const text = String(dictionaries.en[key] ?? key);
+    if (!params) return text;
+    return text.replace(/\{(\w+)\}/g, (match, name) => (params[name] === undefined ? match : String(params[name])));
+  };
+  hookQueue = [status, false, null, false, 0];
+  try {
+    return component({ t });
+  } finally {
+    hookQueue = null;
+  }
+}
+
+test('a provider-sync write failure is reported as failed in the error tone', () => {
+  const { plugin } = loadClient();
+  const runtime = boot(plugin);
+  const component = runtime.registered[0].component;
+
+  const tree = renderStatus(component, runtime.dictionaries, {
+    ...signedInStatus,
+    providerSync: { ok: false, reason: 'EPERM: operation not permitted' },
+  });
+  const json = JSON.stringify(tree);
+  assert.match(json, /Configuration failed: EPERM: operation not permitted/);
+  assert.match(json, /"data-tone":"error"/);
+});
+
+test('a disabled provider sync reads as disabled, without the error tone', () => {
+  const { plugin } = loadClient();
+  const runtime = boot(plugin);
+  const component = runtime.registered[0].component;
+
+  const tree = renderStatus(component, runtime.dictionaries, {
+    ...signedInStatus,
+    providerSync: { ok: false, skipped: true, reason: 'providerSync disabled in state file' },
+  });
+  const json = JSON.stringify(tree);
+  assert.match(json, /Disabled in the state file/);
+  assert.doesNotMatch(json, /Configuration failed/);
+  assert.doesNotMatch(json, /"data-tone":"error"/);
+});
+
