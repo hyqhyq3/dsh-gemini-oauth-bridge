@@ -144,8 +144,9 @@ test('stylesheet is injected once and removed on dispose', () => {
 
 test('zh and en dictionaries keep identical keys and placeholders', () => {
   const { plugin } = loadClient();
-  const dictionaries = plugin.__dictionaries;
-  assert.ok(dictionaries && dictionaries.zh && dictionaries.en, 'the module exposes its dictionaries for the test');
+  const runtime = boot(plugin);
+  const dictionaries = runtime.dictionaries;
+  assert.ok(dictionaries && dictionaries.zh && dictionaries.en, 'apply() registers the dictionaries through the locale slot');
   const { zh, en } = dictionaries;
 
   assert.deepEqual(Object.keys(zh).sort(), Object.keys(en).sort());
@@ -240,5 +241,104 @@ test('a disabled provider sync reads as disabled, without the error tone', () =>
   assert.match(json, /Disabled in the state file/);
   assert.doesNotMatch(json, /Configuration failed/);
   assert.doesNotMatch(json, /"data-tone":"error"/);
+});
+
+// The section renders the tree the tests inspect, so the state table below walks
+// the element doubles instead of matching against serialized JSON.
+function walk(node, visit) {
+  if (node === null || node === undefined) return;
+  if (Array.isArray(node)) {
+    for (const child of node) walk(child, visit);
+    return;
+  }
+  if (typeof node !== 'object') {
+    visit(node);
+    return;
+  }
+  visit(node);
+  for (const child of node.children ?? []) walk(child, visit);
+}
+
+function findAll(tree, predicate) {
+  const found = [];
+  walk(tree, (node) => {
+    if (node && typeof node === 'object' && predicate(node)) found.push(node);
+  });
+  return found;
+}
+
+function textOf(node) {
+  const parts = [];
+  walk(node, (leaf) => {
+    if (typeof leaf === 'string' || typeof leaf === 'number') parts.push(String(leaf));
+  });
+  return parts.join('').trim();
+}
+
+test('every status picks its own state label, dot, hint and actions', () => {
+  const { plugin } = loadClient();
+  const runtime = boot(plugin);
+  const component = runtime.registered[0].component;
+  const dictionaries = runtime.dictionaries;
+
+  const cases = [
+    {
+      name: 'signed in',
+      status: { ...signedInStatus, cooldowns: { 'gemini-3-pro': Date.now() + 60_000 } },
+      label: 'Signed in',
+      dot: 'success',
+      hint: 'Requests use your subscription quota',
+      actions: ['Sign in again', 'Refresh model list', 'Refresh client version', 'Sign out'],
+      hidden: ['Sign in with Google', 'Retry'],
+      cooldown: /gemini-3-pro until /,
+    },
+    {
+      name: 'signed out',
+      status: { ...signedInStatus, loggedIn: false, email: null, project: null, tier: null, providerSync: null },
+      label: 'Not signed in',
+      dot: 'idle',
+      hint: 'Open Google sign-in and complete the authorization',
+      actions: ['Sign in with Google'],
+      hidden: ['Sign in again', 'Refresh model list', 'Sign out', 'Retry'],
+      cooldown: null,
+    },
+    {
+      name: 'sign-in pending',
+      status: { ...signedInStatus, loggedIn: false, email: null, loginPending: true },
+      label: 'Sign-in in progress',
+      dot: 'warning',
+      hint: 'Complete the authorization in the browser tab that opened',
+      actions: ['Sign in with Google'],
+      hidden: ['Sign out', 'Retry'],
+      cooldown: null,
+    },
+    {
+      name: 'connection error',
+      status: { ok: false, error: 'bridge unreachable' },
+      label: 'Connection error',
+      dot: 'error',
+      actions: ['Retry'],
+      hidden: ['Sign in with Google', 'Sign in again', 'Refresh model list', 'Sign out'],
+      cooldown: null,
+    },
+  ];
+
+  for (const expected of cases) {
+    const tree = renderStatus(component, dictionaries, expected.status);
+    const stateNode = findAll(tree, (node) => node.props && node.props.role === 'status')[0];
+    assert.ok(stateNode, `${expected.name}: state row`);
+    assert.equal(textOf(stateNode), expected.label, expected.name);
+
+    const dot = findAll(stateNode, (node) => node.props && node.props.className === 'gob-dot')[0];
+    assert.equal(dot.props['data-state'], expected.dot, `${expected.name}: dot`);
+
+    const text = textOf(tree);
+    if (expected.hint) assert.ok(text.includes(expected.hint), `${expected.name}: hint`);
+    if (expected.cooldown) assert.match(text, expected.cooldown, `${expected.name}: cooldown`);
+
+    const buttons = findAll(tree, (node) => node.type === 'button').map(textOf);
+    for (const action of expected.actions) assert.ok(buttons.includes(action), `${expected.name}: ${action}`);
+    for (const hidden of expected.hidden) assert.ok(!buttons.includes(hidden), `${expected.name}: ${hidden}`);
+  }
 });
 
