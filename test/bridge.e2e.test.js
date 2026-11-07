@@ -9,8 +9,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import http from 'node:http';
 
+// os.homedir() reads HOME on POSIX but USERPROFILE on Windows: set both, or the
+// bridge resolves the real ~/.dsh and the assertions read live account state.
 const fakeHome = mkdtempSync(join(tmpdir(), 'gemini-oauth-bridge-e2e-'));
 process.env.HOME = fakeHome;
+process.env.USERPROFILE = fakeHome;
 
 // --- boot the mock upstream before anything else runs ---
 
@@ -382,7 +385,10 @@ test('refresh-models syncs llm-pi-ai.providers.gemini-oauth into settings.yaml',
   assert.deepEqual(body.provider.credential, { ok: true, created: true });
   const credPath = join(fakeHome, '.dsh', '.credentials.yaml');
   assert.equal(readFileSync(credPath, 'utf8'), 'version: 1\nrefs:\n  GEMINI_OAUTH_API_KEY: dsh-gemini-oauth-bridge\n');
-  assert.equal(statSync(credPath).mode & 0o777, 0o600);
+  // Windows has no POSIX mode bits to assert on: fs reports 0o666 for every file
+  // regardless of the mode the writer asked for, so the check only means anything
+  // where the platform actually stores permissions.
+  if (process.platform !== 'win32') assert.equal(statSync(credPath).mode & 0o777, 0o600);
 
   // second sync is byte-identical (idempotent) for both documents
   const before = text;
