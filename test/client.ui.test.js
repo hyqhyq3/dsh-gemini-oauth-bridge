@@ -472,12 +472,16 @@ test('a signed-out status keeps the tab strip and keeps model chips off the over
   // Each locked tab explains the sign-in requirement instead of rendering empty.
   assert.match(textOf(panels[1]), /Sign in to see your subscription quota/);
   assert.match(textOf(panels[2]), /Sign in to start recording usage/);
+  assert.match(textOf(panels[3]), /Sign in to see the available models/);
 
-  // Model chips belong to the model tab alone.
+  // Model availability follows the account tier, so a cached list must never be
+  // shown to a signed-out visitor: no chips, no model ids, and no count badge.
   const chips = (panel) => findAll(panel, (node) => node.props && node.props.className === 'gob-chip').length;
   assert.equal(chips(panels[0]), 0, 'overview must not repeat the model list');
-  assert.equal(chips(panels[3]), 1, 'the model tab owns the chips');
-  assert.match(textOf(panels[3]), /gemini-3\.1-flash-lite/);
+  assert.equal(chips(panels[3]), 0, 'a signed-out model tab must not show cached chips');
+  assert.doesNotMatch(textOf(panels[3]), /gemini-3\.1-flash-lite/, 'no cached model ids when signed out');
+  const modelsTab = findAll(tree, (node) => node.props && node.props.className === 'gob-tab' && textOf(node).startsWith('Models'))[0];
+  assert.equal(findAll(modelsTab, (node) => node.props && node.props.className === 'gob-tabBadge').length, 0, 'no count badge when signed out');
 });
 
 
