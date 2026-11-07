@@ -19,9 +19,10 @@
 - **不做虚假宣传的模型列表**：上游模型目录里标记 `disabled: true` 的条目（例如 `gemini-4-argon-disabled`，`tagTitle: "Unavailable"`、`tagDescription: "Gemini 4 Argon is currently available to Ultra and paid Pro plan subscribers."`）不会被写进 DSH 的模型列表，避免选择器里出现"选了必然失败"的模型；请求此类模型时返回上游自己的说明并提示刷新模型列表，而不是含义不明的 `404 Requested entity was not found`。模型的上下文/输出上限改从上游的 `maxTokens` / `maxOutputTokens` 字段读取。
 - **浏览器信任围栏**：插件的 prefix 路由先于 DSH 自身的 Host/Origin 围栏被派发，因此插件自行实现同样的规则——`Host` 必须是本插件服务的地址（默认仅回环），跨站请求、`Origin` 为不透明的 `null`（沙箱 iframe 会这样发）、或 `Origin` 与 `Host` 不一致的请求一律 403；完全不带 `Host` 的请求只接受回环对端（例如进程内合成的请求）。
 - **设置页分模块**：整个区块拆成 **账号与配置 / 订阅额度 / 用量图表 / 可用模型** 四个面板，各自只显示自己的操作按钮（刷新客户端版本、刷新额度、刷新模型列表、退出登录）。
-- **订阅额度展示（自动刷新）**：打开 Settings → Gemini OAuth 页面时（以及每次对话完成时）自动查询 `v1internal:retrieveUserQuotaSummary`，展示各模型池（Gemini、Claude/GPT、Argon 等）的**周额度**（`weekly`）与 **5 小时额度**（`5h`）剩余百分比、进度条、重置时间与刷新时间，并支持手动点击「刷新额度」。
+- **订阅额度展示（自动刷新）**：打开 Settings → Gemini OAuth 页面时查询 `v1internal:retrieveUserQuotaSummary`，对话完成后最多每分钟补查一次；状态轮询走两分钟缓存，因此连续对话不会每轮都消耗一次上游请求。展示各模型池（Gemini、Claude/GPT、Argon 等）的**周额度**（`weekly`）与 **5 小时额度**（`5h`）剩余百分比、进度条、重置时间与刷新时间，并支持手动点击「刷新额度」。
 - **模型思考等级两级选择（先选模型、再选思考等级）**：自动把上游同模型不同思考档位（如 `*-low`、`*-medium`、`*-high`）归并为单个基础模型，并在 `llm-pi-ai` 配置中声明 `reasoningEfforts`，在 DSH 模型选择器里实现先选模型再选思考等级；请求到达 `/v1/chat/completions` 时自动按 `(model, reasoning_effort)` 还原为上游真实模型 ID。
-- **本机用量看板**：按本地「天 / 小时」双维度记录调用次数（成功 / 失败 / 429 限流）与输入/输出 Token，渲染 4 格指标卡、Token 立柱 + 调用次数折线的趋势图、模型占比环形图与模型明细表。趋势图支持点击下钻（周 → 天 → 该日 24 小时），用单一的「← 返回上一级」回退，上方指标卡始终汇总当前所见周期。
+- **同一份模型清单，两个出口**：`GET /v1/models` 与 provider 文档走同一套可发布过滤与同一套思考等级归并，并附带每个条目的上下文/输出上限，因此模型发现流程不可能拿到与实际路由不一致的列表。
+- **本机用量看板**：按本地「天 / 小时」双维度记录调用次数（成功 / 失败 / 429 限流）与输入/输出 Token，渲染 4 格指标卡、Token 立柱 + 调用次数折线的趋势图、模型占比环形图与模型明细表。趋势图支持点击下钻（周 → 天 → 该日 24 小时），用单一的「← 返回上一级」回退。图上不叠任何悬浮层：鼠标移到某根柱子上，4 格指标卡与标题会切换成该时间桶的数据，移出图表即恢复为整周期汇总。
 - **Token 单飞刷新**：access token 过期前 120 秒自动用 refresh token 续期，并发请求合并为一次刷新。
 
 ## 安装
@@ -81,6 +82,7 @@ llm-pi-ai:
 - **限流退避**：429 时读取 `Retry-After` 头或响应内 `retryDelay`，进入按模型冷却（上限 30 分钟），冷却期内不发出上游请求。
 - **订阅 tier 识别**：请求权益按 `paidTier.id` 解析（Google AI Pro → `g1-pro-tier`），`currentTier` 显示 free-tier 只是注册态，不影响实际配额与模型访问。
 - **provider 自动配置**：登录成功和「刷新模型列表」时，自动写入 `llm-pi-ai.providers.gemini-oauth` 路由（含最新模型 ID 和 `GEMINI_OAUTH_API_KEY` 凭据引用）。DSH 提供设置服务时走官方 Models 页面同款路径——变更即时热生效并持久化到活跃 profile 的 `cordis.patch.yml`，只动 gemini-oauth 这一个路由，且由适配器自身的 schema 校验、失败自动回滚；设置服务不可用或写入失败时，才会回退写入遗留的 `~/.dsh/settings.yaml`（外科手术式合并，首次修改前自动备份为 `settings.yaml.bak-gemini-oauth-bridge`），旧版本部署重启后加载；热更新一旦成功就不再触碰该文件——DSH ≥ 0.2 下次启动会把它导入并重命名为 `settings.yaml.imported`，重写等于覆盖这份存档。同时在 `~/.dsh/.credentials.yaml` 里补上占位 key（只追加，不覆盖；无法确认结构的 version-1 文档一律不动并如实报错）。`chat_*`/`tab_*` 内部 ID 会被过滤。在 state 文件中设 `"providerSync": false` 可关闭自动写入。
+- **端口自愈**：DSH 每次启动可能绑定不同端口，而 `llm-pi-ai` 只接受字面量 `baseURL`（不支持变量插值），因此写下的路由可能指向一个早已没有进程监听的空端口——桥接本身完全正常，DSH 的模型请求却全部以 `Connection error` 告终。只要曾经发布过 provider 配置，插件就会把它重新指向本进程实际持有的监听地址：启动时执行一次（端口要等 socket 绑定后才可读，因此带重试），之后任何一次入站请求只要证明记录的地址已过期，也会在后台自动纠正。从未发布过 provider 的全新安装不会被触碰。
 - **公开客户端凭据**：OAuth client 凭据是 Antigravity 应用内嵌的公开值（CLIProxyAPI 开源库同样原样公开），仓库中以 base64 形式存放——只为避免 GitHub push protection 的扫描噪声，运行时解码。
 
 ## 安全说明
