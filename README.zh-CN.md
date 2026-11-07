@@ -18,7 +18,7 @@
 - **429 冷却**：解析上游 Retry-After / retryDelay，按模型进入冷却窗口，冷却期内直接本地返回 429，不硬刷上游。
 - **不做虚假宣传的模型列表**：上游模型目录里标记 `disabled: true` 的条目（例如 `gemini-4-argon-disabled`，`tagTitle: "Unavailable"`、`tagDescription: "Gemini 4 Argon is currently available to Ultra and paid Pro plan subscribers."`）不会被写进 DSH 的模型列表，避免选择器里出现"选了必然失败"的模型；请求此类模型时返回上游自己的说明并提示刷新模型列表，而不是含义不明的 `404 Requested entity was not found`。模型的上下文/输出上限改从上游的 `maxTokens` / `maxOutputTokens` 字段读取。
 - **浏览器信任围栏**：插件的 prefix 路由先于 DSH 自身的 Host/Origin 围栏被派发，因此插件自行实现同样的规则——`Host` 必须是本插件服务的地址（默认仅回环），跨站请求、`Origin` 为不透明的 `null`（沙箱 iframe 会这样发）、或 `Origin` 与 `Host` 不一致的请求一律 403；完全不带 `Host` 的请求只接受回环对端（例如进程内合成的请求）。
-- **设置页分模块**：整个区块拆成 **账号与配置 / 订阅额度 / 用量图表 / 可用模型** 四个面板，各自只显示自己的操作按钮（刷新客户端版本、刷新额度、刷新模型列表、退出登录）。
+- **设置页分模块**：整个区块拆成 **账号与配置 / 订阅额度 / 用量图表 / 可用模型** 四个面板，各自只显示自己的操作按钮（刷新客户端版本、刷新额度、刷新模型列表、退出登录）。四个面板在未登录时同样保留：额度与用量面板提示登录后可查看的内容，模型面板只在登录后提供「刷新模型列表」（该接口需要 token），因此登出不会退回到单页排版。
 - **订阅额度展示（自动刷新）**：打开 Settings → Gemini OAuth 页面时查询 `v1internal:retrieveUserQuotaSummary`，对话完成后最多每分钟补查一次；状态轮询走两分钟缓存，因此连续对话不会每轮都消耗一次上游请求。展示各模型池（Gemini、Claude/GPT、Argon 等）的**周额度**（`weekly`）与 **5 小时额度**（`5h`）剩余百分比、进度条、重置时间与刷新时间，并支持手动点击「刷新额度」。
 - **模型思考等级两级选择（先选模型、再选思考等级）**：自动把上游同模型不同思考档位（如 `*-low`、`*-medium`、`*-high`）归并为单个基础模型，并在 `llm-pi-ai` 配置中声明 `reasoningEfforts`，在 DSH 模型选择器里实现先选模型再选思考等级；请求到达 `/v1/chat/completions` 时自动按 `(model, reasoning_effort)` 还原为上游真实模型 ID。
 - **同一份模型清单，两个出口**：`GET /v1/models` 与 provider 文档走同一套可发布过滤与同一套思考等级归并，并附带每个条目的上下文/输出上限，因此模型发现流程不可能拿到与实际路由不一致的列表。

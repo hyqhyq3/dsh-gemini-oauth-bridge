@@ -432,4 +432,52 @@ test('signed-in status renders subscription quota groups with weekly and 5h buck
   assert.match(text, /Requires Pro or Ultra/);
 });
 
+// Losing the token must not collapse the page back to the single-pane layout the
+// redesign replaced: the tab strip and its four panels stay, each panel explaining
+// what signing in would unlock, and the model chips stay on the model tab only.
+test('a signed-out status keeps the tab strip and keeps model chips off the overview tab', () => {
+  const { plugin } = loadClient();
+  const runtime = boot(plugin);
+  const component = runtime.registered[0].component;
+  const dictionaries = runtime.dictionaries;
+
+  const tree = renderStatus(component, dictionaries, {
+    ok: true,
+    loggedIn: false,
+    email: null,
+    project: null,
+    tier: null,
+    version: '2.29.0',
+    versionSource: 'cache',
+    modelSource: 'upstream',
+    groupedModels: [{ id: 'gemini-3.1-flash-lite', contextWindow: 1048576, maxTokens: 65535 }],
+    quota: null,
+    usageStats: { requests: 0 },
+    loginPending: false,
+    providerSync: { at: 1, models: 1, host: '127.0.0.1:3080', hotReload: true },
+  });
+
+  const tabs = findAll(tree, (node) => node.props && node.props.className === 'gob-tab').map(textOf);
+  assert.equal(tabs.length, 4, 'all four tabs stay visible');
+  for (const label of ['Overview', 'Quota', 'Usage charts', 'Models']) {
+    assert.ok(tabs.some((text) => text.startsWith(label)), `tab: ${label}`);
+  }
+
+  const panels = findAll(tree, (node) => node.props && node.props.className === 'gob-panel');
+  assert.equal(panels.length, 4, 'one panel per tab');
+
+  // The overview keeps the account facts and shows the sign-in hint.
+  assert.match(textOf(panels[0]), /Open Google sign-in and complete the authorization/);
+
+  // Each locked tab explains the sign-in requirement instead of rendering empty.
+  assert.match(textOf(panels[1]), /Sign in to see your subscription quota/);
+  assert.match(textOf(panels[2]), /Sign in to start recording usage/);
+
+  // Model chips belong to the model tab alone.
+  const chips = (panel) => findAll(panel, (node) => node.props && node.props.className === 'gob-chip').length;
+  assert.equal(chips(panels[0]), 0, 'overview must not repeat the model list');
+  assert.equal(chips(panels[3]), 1, 'the model tab owns the chips');
+  assert.match(textOf(panels[3]), /gemini-3\.1-flash-lite/);
+});
+
 
