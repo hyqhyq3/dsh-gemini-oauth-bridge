@@ -288,7 +288,7 @@ test('every status picks its own state label, dot, hint and actions', () => {
       label: 'Signed in',
       dot: 'success',
       hint: 'Requests use your subscription quota',
-      actions: ['Sign in again', 'Refresh model list', 'Refresh client version', 'Sign out'],
+      actions: ['Sign in again', 'Refresh model list', 'Refresh quota', 'Refresh client version', 'Sign out'],
       hidden: ['Sign in with Google', 'Retry'],
       cooldown: /gemini-3-pro until /,
     },
@@ -341,4 +341,95 @@ test('every status picks its own state label, dot, hint and actions', () => {
     for (const hidden of expected.hidden) assert.ok(!buttons.includes(hidden), `${expected.name}: ${hidden}`);
   }
 });
+
+test('signed-in status renders subscription quota groups with weekly and 5h buckets', () => {
+  const { plugin } = loadClient();
+  const runtime = boot(plugin);
+  const component = runtime.registered[0].component;
+  const dictionaries = runtime.dictionaries;
+
+  const tree = renderStatus(component, dictionaries, {
+    ...signedInStatus,
+    quota: {
+      fetchedAt: 1700000000000,
+      groups: [
+        {
+          name: 'Gemini Models',
+          buckets: [
+            { id: 'gemini-weekly', window: 'weekly', remaining: 0.999, resetAt: 1700600000000, disabled: false },
+            { id: 'gemini-5h', window: '5h', remaining: 0.25, resetAt: 1700018000000, disabled: false },
+          ],
+        },
+        {
+          name: 'Claude and GPT models',
+          buckets: [
+            { id: '3p-weekly', window: 'weekly', remaining: 0, resetAt: 1700600000000, disabled: false },
+            { id: '3p-5h', window: '5h', remaining: 1, resetAt: null, disabled: true },
+          ],
+        },
+      ],
+    },
+    usageStats: (() => {
+      // The KPI cards summarise the *displayed period*, so the fixture has to
+      // carry buckets inside the default 7-day window rather than a total.
+      const now = new Date();
+      const dayKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+      const hourKey = `${dayKey}T${String(now.getHours()).padStart(2, '0')}`;
+      const bucket = {
+        requests: 5,
+        succeeded: 4,
+        failed: 1,
+        rateLimited: 1,
+        promptTokens: 12000,
+        completionTokens: 3000,
+        totalTokens: 15000,
+      };
+      return {
+        requests: 5,
+        succeeded: 4,
+        failed: 1,
+        rateLimited: 1,
+        promptTokens: 12000,
+        completionTokens: 3000,
+        totalTokens: 15000,
+        lastCallAt: now.getTime(),
+        byModel: {
+          'gemini-4-argon-high': { requests: 4, totalTokens: 14000 },
+        },
+        byDay: { [dayKey]: { ...bucket } },
+        byHour: { [hourKey]: { ...bucket } },
+      };
+    })(),
+    groupedModels: [
+      { id: 'gemini-4-argon', reasoningEfforts: { low: 'low', medium: 'medium', high: 'high' }, contextWindow: 1048576, maxTokens: 65536 },
+    ],
+    unavailableModels: {
+      'gemini-4-argon-disabled': 'Requires Pro or Ultra',
+    },
+    tokenExpiresAt: 1700003600000,
+    signatureCount: 12,
+  });
+
+  const text = textOf(tree);
+  assert.match(text, /Quota/);
+  assert.match(text, /Updated at /);
+  assert.match(text, /Gemini Models/);
+  assert.match(text, /Claude and GPT models/);
+  assert.match(text, /Weekly limit/);
+  assert.match(text, /5-hour limit/);
+  assert.match(text, /100% remaining/);
+  assert.match(text, /25% remaining/);
+  assert.match(text, /0% remaining/);
+  assert.match(text, /Inactive/);
+  assert.match(text, /Local call usage/);
+  assert.match(text, /Total calls/);
+  assert.match(text, /7-day trend \(click a day for 24h\)/);
+  assert.match(text, /← Back up/);
+  assert.match(text, /Token share by model/);
+  assert.match(text, /5 calls/);
+  assert.match(text, /low\/medium\/high/);
+  assert.match(text, /12 \/ 800/);
+  assert.match(text, /Requires Pro or Ultra/);
+});
+
 
