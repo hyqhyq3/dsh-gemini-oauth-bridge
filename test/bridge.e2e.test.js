@@ -9,8 +9,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import http from 'node:http';
 
+// os.homedir() reads HOME on POSIX but USERPROFILE on Windows: set both, or the
+// bridge resolves the real ~/.dsh and the assertions read live account state.
 const fakeHome = mkdtempSync(join(tmpdir(), 'gemini-oauth-bridge-e2e-'));
 process.env.HOME = fakeHome;
+process.env.USERPROFILE = fakeHome;
 
 // --- boot the mock upstream before anything else runs ---
 
@@ -112,6 +115,21 @@ const upstream = http.createServer((req, res) => {
             tagDescription: 'Gemini 4 Argon is currently available to Ultra and paid Pro plan subscribers.',
           },
         },
+      }));
+      return;
+    }
+    if (path === '/v1internal:retrieveUserQuotaSummary') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        groups: [
+          {
+            displayName: 'Gemini Models',
+            buckets: [
+              { bucketId: 'gemini-weekly', window: 'weekly', remainingFraction: 0.85, resetTime: '2026-11-13T15:17:29Z' },
+              { bucketId: 'gemini-5h', window: '5h', remainingFraction: 0.9, resetTime: '2026-11-06T20:17:29Z' },
+            ],
+          },
+        ],
       }));
       return;
     }
@@ -367,7 +385,10 @@ test('refresh-models syncs llm-pi-ai.providers.gemini-oauth into settings.yaml',
   assert.deepEqual(body.provider.credential, { ok: true, created: true });
   const credPath = join(fakeHome, '.dsh', '.credentials.yaml');
   assert.equal(readFileSync(credPath, 'utf8'), 'version: 1\nrefs:\n  GEMINI_OAUTH_API_KEY: dsh-gemini-oauth-bridge\n');
-  assert.equal(statSync(credPath).mode & 0o777, 0o600);
+  // Windows has no POSIX mode bits to assert on: fs reports 0o666 for every file
+  // regardless of the mode the writer asked for, so the check only means anything
+  // where the platform actually stores permissions.
+  if (process.platform !== 'win32') assert.equal(statSync(credPath).mode & 0o777, 0o600);
 
   // second sync is byte-identical (idempotent) for both documents
   const before = text;
@@ -378,6 +399,26 @@ test('refresh-models syncs llm-pi-ai.providers.gemini-oauth into settings.yaml',
   assert.equal(readFileSync(settingsPath, 'utf8'), before);
   assert.equal(readFileSync(credPath, 'utf8'), credBefore);
 });
+
+test('refresh-quota fetches weekly and 5h quota summary and surfaces it on status', async () => {
+  const res = await fetch(`http://127.0.0.1:${port}/gemini-oauth-bridge/api/refresh-quota`, { method: 'POST' });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.ok, true);
+  assert.equal(body.quota.groups[0].name, 'Gemini Models');
+  assert.equal(body.quota.groups[0].buckets[0].id, 'gemini-weekly');
+  assert.equal(body.quota.groups[0].buckets[0].remaining, 0.85);
+  assert.equal(body.quota.groups[0].buckets[1].id, 'gemini-5h');
+  assert.equal(body.quota.groups[0].buckets[1].remaining, 0.9);
+
+  const status = await (await fetch(`http://127.0.0.1:${port}/gemini-oauth-bridge/api/status`)).json();
+  assert.equal(status.quota.groups[0].buckets[0].remaining, 0.85);
+  assert.ok(status.usageStats.requests >= 1, 'status exposes accumulated local call usageStats');
+  assert.ok(status.usageStats.byDay && Object.keys(status.usageStats.byDay).length >= 1, 'usage is bucketed by local day');
+  assert.ok(status.usageStats.byHour && Object.keys(status.usageStats.byHour).length >= 1, 'usage is bucketed by local hour');
+  assert.ok(Array.isArray(status.groupedModels) && status.groupedModels.length >= 1, 'status exposes thinking-effort-grouped models');
+});
+
 
 test('an upstream 404 NOT_FOUND names the model and the upstream reason', async () => {
   // load the disabled-model reasons into state first (order-independent)

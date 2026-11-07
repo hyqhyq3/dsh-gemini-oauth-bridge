@@ -9,8 +9,11 @@ import { join } from 'node:path';
 import http from 'node:http';
 
 // Isolate state: lib/index.js resolves ~/.dsh via os.homedir() at import time.
+// os.homedir() reads HOME on POSIX but USERPROFILE on Windows, so both have to
+// point at the temp dir or the suite reads the real ~/.dsh and asserts on it.
 const fakeHome = mkdtempSync(join(tmpdir(), 'gemini-oauth-bridge-'));
 process.env.HOME = fakeHome;
+process.env.USERPROFILE = fakeHome;
 
 const { apply, inject } = await import('../lib/index.js');
 

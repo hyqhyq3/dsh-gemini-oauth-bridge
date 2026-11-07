@@ -11,6 +11,11 @@ import * as protocol from '../lib/protocol.js';
 
 const clientSource = fs.readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8');
 const hostSource = fs.readFileSync(new URL('../lib/index.js', import.meta.url), 'utf8');
+// The sources are checked in with LF but a Windows checkout (core.autocrlf) hands
+// them back with CRLF. Everything that slices the source below has to tolerate
+// both, or the import-stripping regex silently matches nothing and vm is handed a
+// module full of `import` statements.
+const lf = (text) => text.replace(/\r\n/g, '\n');
 function parity(zh, en) {
   assert.deepEqual(Object.keys(zh).sort(), Object.keys(en).sort());
   for (const key of Object.keys(zh)) {
@@ -27,7 +32,7 @@ function host(overrides = {}) {
     fetch: async () => { throw new Error('offline'); },
     createServer(fn) { callback = fn; return { on() {}, once() {}, listen(port, addr, fn) { fn(); }, close() {} }; },
   });
-  const source = hostSource.replace(/^import [\s\S]*? from '[^']+';\n/gm, '').replace(/export /g, '');
+  const source = lf(hostSource).replace(/^import [\s\S]*? from '[^']+';\n/gm, '').replace(/export /g, '');
   vm.runInContext(source + '\n globalThis.subject = { zh, en, resolveLang, message, renderMessage, renderPayload, callbackPage, apply, syncProvider, localizedError };', context);
   const subject = context.subject;
   context.overrides = overrides;

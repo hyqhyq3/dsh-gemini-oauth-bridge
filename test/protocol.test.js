@@ -503,7 +503,7 @@ test('history translation re-attaches thoughtSignature via opts.getSignature', (
 
 // ---------- tier resolution & model catalog parsing ----------
 
-import { resolveTier, parseAvailableModels, isTrustedAuthority } from '../lib/protocol.js';
+import { resolveTier, parseAvailableModels, parseQuotaSummary, groupModelsByEffort, resolveUpstreamModelId, isTrustedAuthority } from '../lib/protocol.js';
 
 test('resolveTier prefers the paid subscription tier over currentTier', () => {
   assert.equal(resolveTier({ paidTier: { id: 'g1-pro-tier', name: 'Google AI Pro' }, currentTier: { id: 'free-tier' } }), 'g1-pro-tier');
@@ -578,6 +578,111 @@ test('parseAvailableModels treats available:false as unavailable and falls back 
   assert.equal(parsed.unavailable['gone-model'], 'Unavailable');
   assert.deepEqual(parsed.caps['ok-model'], { contextLength: 4096 });
 });
+
+test('parseQuotaSummary parses weekly and 5h buckets, spent pools, disabled windows and epoch resets', () => {
+  const summary = parseQuotaSummary({
+    description: 'Shared pools across models.',
+    groups: [
+      {
+        displayName: 'Gemini Models',
+        description: 'Gemini Flash, Gemini Pro',
+        buckets: [
+          {
+            bucketId: 'gemini-weekly',
+            displayName: 'Weekly Limit Remaining',
+            window: 'weekly',
+            remainingFraction: 0.9995,
+            resetTime: '2026-11-13T15:17:29Z',
+          },
+          {
+            bucketId: 'gemini-5h',
+            displayName: 'Five Hour Limit Remaining',
+            window: '5h',
+            remainingFraction: 0.5,
+            resetTime: '2026-11-06T20:17:29Z',
+          },
+        ],
+      },
+      {
+        displayName: 'Claude and GPT models',
+        buckets: [
+          // A spent bucket may omit remainingFraction and keep resetTime
+          { bucketId: '3p-weekly', window: 'weekly', resetTime: '2026-11-13T15:23:19Z' },
+          // A disabled 5h bucket when weekly is spent
+          { bucketId: '3p-5h', window: '5h', remainingFraction: 1, disabled: true, resetTime: '1970-01-01T00:00:00Z' },
+        ],
+      },
+    ],
+  });
+
+  assert.ok(summary);
+  assert.equal(summary.description, 'Shared pools across models.');
+  assert.equal(summary.groups.length, 2);
+  assert.equal(summary.groups[0].name, 'Gemini Models');
+  assert.equal(summary.groups[0].buckets[0].id, 'gemini-weekly');
+  assert.equal(summary.groups[0].buckets[0].window, 'weekly');
+  assert.equal(summary.groups[0].buckets[0].remaining, 0.9995);
+  assert.equal(summary.groups[0].buckets[0].resetAt, Date.parse('2026-11-13T15:17:29Z'));
+  assert.equal(summary.groups[0].buckets[1].window, '5h');
+  assert.equal(summary.groups[0].buckets[1].remaining, 0.5);
+
+  assert.equal(summary.groups[1].buckets[0].remaining, 0, 'omitted remainingFraction with valid resetTime means exhausted');
+  assert.equal(summary.groups[1].buckets[1].disabled, true);
+  assert.equal(summary.groups[1].buckets[1].resetAt, null, 'epoch resetTime placeholder is treated as null');
+
+  // Accepts wrapped { response: { groups } } shape as well
+  const wrapped = parseQuotaSummary({ response: { groups: [{ displayName: 'Gemini', buckets: [] }] } });
+  assert.equal(wrapped.groups.length, 1);
+
+  assert.equal(parseQuotaSummary(null), null);
+  assert.equal(parseQuotaSummary({}), null);
+  assert.equal(parseQuotaSummary({ groups: [] }), null);
+});
+
+test('groupModelsByEffort collapses multi-effort families and resolveUpstreamModelId maps back', () => {
+  const rawIds = [
+    'gemini-4-argon-low',
+    'gemini-4-argon-medium',
+    'gemini-4-argon-high',
+    'claude-opus-5-5-low',
+    'claude-opus-5-5-high',
+    'gemini-2.5-pro',
+    'gpt-oss-120b-medium',
+  ];
+  const caps = {
+    'gemini-4-argon-high': { contextLength: 1048576, maxCompletionTokens: 65536 },
+    'gemini-2.5-pro': { contextLength: 2097152, maxCompletionTokens: 65536 },
+  };
+  const grouped = groupModelsByEffort(rawIds, caps);
+  assert.deepEqual(grouped, [
+    {
+      id: 'gemini-4-argon',
+      reasoningEfforts: { low: 'low', medium: 'medium', high: 'high' },
+      contextWindow: 1048576,
+      maxTokens: 65536,
+    },
+    {
+      id: 'claude-opus-5-5',
+      reasoningEfforts: { low: 'low', high: 'high' },
+    },
+    {
+      id: 'gemini-2.5-pro',
+      contextWindow: 2097152,
+      maxTokens: 65536,
+    },
+    {
+      id: 'gpt-oss-120b-medium',
+    },
+  ]);
+
+  assert.equal(resolveUpstreamModelId('gemini-4-argon', 'low', rawIds), 'gemini-4-argon-low');
+  assert.equal(resolveUpstreamModelId('gemini-4-argon', 'medium', rawIds), 'gemini-4-argon-medium');
+  assert.equal(resolveUpstreamModelId('gemini-4-argon', undefined, rawIds), 'gemini-4-argon-high');
+  assert.equal(resolveUpstreamModelId('gemini-4-argon-low', 'high', rawIds), 'gemini-4-argon-high');
+  assert.equal(resolveUpstreamModelId('gemini-2.5-pro', undefined, rawIds), 'gemini-2.5-pro');
+});
+
+
 
 // ---------- browser-trust fence: authority rule ----------
 
