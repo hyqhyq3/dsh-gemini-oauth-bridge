@@ -115,6 +115,21 @@ const upstream = http.createServer((req, res) => {
       }));
       return;
     }
+    if (path === '/v1internal:retrieveUserQuotaSummary') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        groups: [
+          {
+            displayName: 'Gemini Models',
+            buckets: [
+              { bucketId: 'gemini-weekly', window: 'weekly', remainingFraction: 0.85, resetTime: '2026-11-13T15:17:29Z' },
+              { bucketId: 'gemini-5h', window: '5h', remainingFraction: 0.9, resetTime: '2026-11-06T20:17:29Z' },
+            ],
+          },
+        ],
+      }));
+      return;
+    }
     if (path === '/v1internal:generateContent') {
       // Bodies that are not a completion: the bridge must not report these as a
       // successful empty answer.
@@ -378,6 +393,26 @@ test('refresh-models syncs llm-pi-ai.providers.gemini-oauth into settings.yaml',
   assert.equal(readFileSync(settingsPath, 'utf8'), before);
   assert.equal(readFileSync(credPath, 'utf8'), credBefore);
 });
+
+test('refresh-quota fetches weekly and 5h quota summary and surfaces it on status', async () => {
+  const res = await fetch(`http://127.0.0.1:${port}/gemini-oauth-bridge/api/refresh-quota`, { method: 'POST' });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.ok, true);
+  assert.equal(body.quota.groups[0].name, 'Gemini Models');
+  assert.equal(body.quota.groups[0].buckets[0].id, 'gemini-weekly');
+  assert.equal(body.quota.groups[0].buckets[0].remaining, 0.85);
+  assert.equal(body.quota.groups[0].buckets[1].id, 'gemini-5h');
+  assert.equal(body.quota.groups[0].buckets[1].remaining, 0.9);
+
+  const status = await (await fetch(`http://127.0.0.1:${port}/gemini-oauth-bridge/api/status`)).json();
+  assert.equal(status.quota.groups[0].buckets[0].remaining, 0.85);
+  assert.ok(status.usageStats.requests >= 1, 'status exposes accumulated local call usageStats');
+  assert.ok(status.usageStats.byDay && Object.keys(status.usageStats.byDay).length >= 1, 'usage is bucketed by local day');
+  assert.ok(status.usageStats.byHour && Object.keys(status.usageStats.byHour).length >= 1, 'usage is bucketed by local hour');
+  assert.ok(Array.isArray(status.groupedModels) && status.groupedModels.length >= 1, 'status exposes thinking-effort-grouped models');
+});
+
 
 test('an upstream 404 NOT_FOUND names the model and the upstream reason', async () => {
   // load the disabled-model reasons into state first (order-independent)
