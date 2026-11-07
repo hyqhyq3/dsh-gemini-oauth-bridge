@@ -10,7 +10,8 @@ const clientSource = fs.readFileSync(new URL('../lib/client.js', import.meta.url
 
 // The section reads its data through useState, so a test that wants a non-loading
 // render queues the hook values the component will receive, in call order:
-// status, busy, notice, loginFailed, attempt.
+// status, busy, notice, loginFailed, attempt, then optionally activeTab,
+// chartView, hoverBucket (the defaults apply for any hook left unqueued).
 let hookQueue = null;
 
 function loadClient() {
@@ -200,18 +201,22 @@ const signedInStatus = {
   cooldowns: {},
 };
 
-function renderStatus(component, dictionaries, status) {
+function renderStatus(component, dictionaries, status, hookTail = []) {
   const t = (key, params) => {
     const text = String(dictionaries.en[key] ?? key);
     if (!params) return text;
     return text.replace(/\{(\w+)\}/g, (match, name) => (params[name] === undefined ? match : String(params[name])));
   };
-  hookQueue = [status, false, null, false, 0];
+  hookQueue = [status, false, null, false, 0, ...hookTail];
   try {
     return component({ t });
   } finally {
     hookQueue = null;
   }
+}
+
+function kpiValues(tree) {
+  return findAll(tree, (node) => node.props && node.props.className === 'gob-kpiValue').map(textOf);
 }
 
 test('a provider-sync write failure is reported as failed in the error tone', () => {
@@ -422,7 +427,11 @@ test('signed-in status renders subscription quota groups with weekly and 5h buck
   assert.match(text, /0% remaining/);
   assert.match(text, /Inactive/);
   assert.match(text, /Local call usage/);
-  assert.match(text, /Total calls/);
+  // KPI cards report whatever scope the chart shows (a hovered bucket or the
+  // displayed period), so their labels must not claim an all-time total.
+  assert.match(text, /Calls/);
+  assert.doesNotMatch(text, /Total calls/);
+  assert.doesNotMatch(text, /Total tokens/);
   assert.match(text, /7-day trend \(click a day for 24h\)/);
   assert.match(text, /← Back up/);
   assert.match(text, /Token share by model/);
@@ -430,6 +439,83 @@ test('signed-in status renders subscription quota groups with weekly and 5h buck
   assert.match(text, /low\/medium\/high/);
   assert.match(text, /12 \/ 800/);
   assert.match(text, /Requires Pro or Ultra/);
+
+  const usageTab = findAll(tree, (node) => node.props && node.props.className === 'gob-tab' && textOf(node).startsWith('Usage'))[0];
+  assert.equal(findAll(usageTab, (node) => node.props && node.props.className === 'gob-tabBadge').map(textOf).join(''), '5', 'usage tab carries the call count while signed in');
+});
+
+// Day buckets outlive hour buckets only while both are inside the shared
+// retention horizon; a partial state can also arrive with day buckets and no
+// hour buckets at all. The hour view must then show an empty day rather than
+// pin the whole day's totals to one fabricated bar.
+test('an hour view for a day without hour buckets shows no fabricated bar', () => {
+  const { plugin } = loadClient();
+  const runtime = boot(plugin);
+  const component = runtime.registered[0].component;
+  const dictionaries = runtime.dictionaries;
+  const now = new Date();
+  const dayKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+  const dayBucket = {
+    requests: 37,
+    succeeded: 37,
+    failed: 0,
+    rateLimited: 0,
+    promptTokens: 1200,
+    completionTokens: 300,
+    totalTokens: 1500,
+  };
+  const status = {
+    ...signedInStatus,
+    usageStats: { ...dayBucket, lastCallAt: now.getTime(), byModel: {}, byDay: { [dayKey]: { ...dayBucket } } },
+  };
+
+  const hours = renderStatus(component, dictionaries, status, ['overview', { level: 'hours', dayKey }, null]);
+  assert.equal(kpiValues(hours)[0], '0', 'the calls KPI must not inherit the day total');
+  const hoursPanel = findAll(hours, (node) => node.props && node.props.className === 'gob-panel')[2];
+  assert.doesNotMatch(textOf(hoursPanel), /37/, 'no bucket may carry the day totals into a single hour');
+
+  const days = renderStatus(component, dictionaries, status, ['overview', { level: 'days' }, null]);
+  assert.equal(kpiValues(days)[0], '37', 'the day level still reports the day total');
+});
+
+// A hover retargets the KPI cards at one bucket, looked up by key from the
+// freshly polled data every render. A key that vanished (a poll across midnight,
+// a pruned bucket) falls back to the period totals instead of freezing an old
+// snapshot.
+test('hover retargets KPIs from current data and falls back on a stale key', () => {
+  const { plugin } = loadClient();
+  const runtime = boot(plugin);
+  const component = runtime.registered[0].component;
+  const dictionaries = runtime.dictionaries;
+  const now = new Date();
+  const fmt = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  const todayKey = fmt(now);
+  const yesterdayKey = fmt(new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1));
+  const status = {
+    ...signedInStatus,
+    usageStats: {
+      requests: 8,
+      succeeded: 8,
+      failed: 0,
+      rateLimited: 0,
+      promptTokens: 1600,
+      completionTokens: 400,
+      totalTokens: 2000,
+      lastCallAt: now.getTime(),
+      byModel: {},
+      byDay: {
+        [todayKey]: { requests: 5, succeeded: 5, failed: 0, rateLimited: 0, promptTokens: 1000, completionTokens: 250, totalTokens: 1250 },
+        [yesterdayKey]: { requests: 3, succeeded: 3, failed: 0, rateLimited: 0, promptTokens: 600, completionTokens: 150, totalTokens: 750 },
+      },
+    },
+  };
+
+  const hovered = renderStatus(component, dictionaries, status, ['overview', { level: 'days' }, todayKey]);
+  assert.match(textOf(hovered), new RegExp(todayKey), 'the heading names the hovered bucket');
+  assert.equal(kpiValues(hovered)[0], '5', 'the KPI cards show the hovered bucket');
+
+  const stale = renderStatus(component, dictionaries, status, ['overview', { level: 'days' }, 'no-such-bucket']);
+  assert.equal(kpiValues(stale)[0], '8', 'an unknown hover key falls back to the period totals');
 });
 
 // Losing the token must not collapse the page back to the single-pane layout the
@@ -482,6 +568,8 @@ test('a signed-out status keeps the tab strip and keeps model chips off the over
   assert.doesNotMatch(textOf(panels[3]), /gemini-3\.1-flash-lite/, 'no cached model ids when signed out');
   const modelsTab = findAll(tree, (node) => node.props && node.props.className === 'gob-tab' && textOf(node).startsWith('Models'))[0];
   assert.equal(findAll(modelsTab, (node) => node.props && node.props.className === 'gob-tabBadge').length, 0, 'no count badge when signed out');
+  const usageTab = findAll(tree, (node) => node.props && node.props.className === 'gob-tab' && textOf(node).startsWith('Usage'))[0];
+  assert.equal(findAll(usageTab, (node) => node.props && node.props.className === 'gob-tabBadge').length, 0, 'no usage count badge when signed out');
 });
 
 
