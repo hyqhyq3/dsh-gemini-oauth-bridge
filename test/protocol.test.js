@@ -657,21 +657,25 @@ test('groupModelsByEffort collapses multi-effort families and resolveUpstreamMod
   assert.deepEqual(grouped, [
     {
       id: 'gemini-4-argon',
+      input: ['text', 'image'],
       reasoningEfforts: { low: 'low', medium: 'medium', high: 'high' },
       contextWindow: 1048576,
       maxTokens: 65536,
     },
     {
       id: 'claude-opus-5-5',
+      input: ['text', 'image'],
       reasoningEfforts: { low: 'low', high: 'high' },
     },
     {
       id: 'gemini-2.5-pro',
+      input: ['text', 'image'],
       contextWindow: 2097152,
       maxTokens: 65536,
     },
     {
       id: 'gpt-oss-120b-medium',
+      input: ['text'],
     },
   ]);
 
@@ -739,7 +743,7 @@ test('mergeProviderYaml inserts the provider without touching sibling providers'
   const r = mergeProviderYaml(before, 'gemini-oauth', BODY6);
   assert.ok(r.ok);
   const out = r.text.split('\n');
-  assert.match(r.text, /    gemini-oauth:\n      api: openai-completions\n      baseURL: http:\/\/127\.0\.0\.1:3080\/gemini-oauth-bridge\/v1\n      apiKeyEnv: GEMINI_OAUTH_API_KEY\n      models:\n        - id: gemini-3\.1-pro-high\n        - id: claude-opus-4-6-thinking\n/);
+  assert.match(r.text, /    gemini-oauth:\n      api: openai-completions\n      baseURL: http:\/\/127\.0\.0\.1:3080\/gemini-oauth-bridge\/v1\n      apiKeyEnv: GEMINI_OAUTH_API_KEY\n      models:\n        - id: gemini-3\.1-pro-high\n          input:\n            - text\n            - image\n        - id: claude-opus-4-6-thinking\n          input:\n            - text\n            - image\n/);
   // siblings preserved verbatim and in order
   const kimi = out.indexOf('    kimi-coding:');
   const zai = out.indexOf('    zai-coding-cn:');
@@ -792,7 +796,29 @@ import { mergeCredentialYaml, PROVIDER_API_KEY_ENV, PROVIDER_PLACEHOLDER_KEY } f
 
 test('buildProviderYamlLines always declares the credential reference', () => {
   const lines = buildProviderYamlLines('127.0.0.1:3080', ['m'], 2);
-  assert.deepEqual(lines, ['  api: openai-completions', '  baseURL: http://127.0.0.1:3080/gemini-oauth-bridge/v1', '  apiKeyEnv: GEMINI_OAUTH_API_KEY', '  models:', '    - id: m']);
+  assert.deepEqual(lines, ['  api: openai-completions', '  baseURL: http://127.0.0.1:3080/gemini-oauth-bridge/v1', '  apiKeyEnv: GEMINI_OAUTH_API_KEY', '  models:', '    - id: m', '      input:', '        - text']);
+});
+
+test('buildProviderYamlLines declares image input for multimodal families only', () => {
+  const lines = buildProviderYamlLines('127.0.0.1:3080', [
+    'gemini-2.5-pro',
+    'claude-opus-5-5',
+    'gpt-oss-120b-medium',
+    'tab_jump_flash_lite_preview',
+    'chat_20706',
+  ], 2);
+  const text = lines.join('\n');
+  // Multimodal families keep the image modality DSH's gate looks for.
+  assert.match(text, /    - id: gemini-2\.5-pro\n      input:\n        - text\n        - image\n/);
+  assert.match(text, /    - id: claude-opus-5-5\n      input:\n        - text\n        - image\n/);
+  // Text-only upstream ids must not claim image input.
+  assert.match(text, /    - id: gpt-oss-120b-medium\n      input:\n        - text\n/);
+  assert.match(text, /    - id: tab_jump_flash_lite_preview\n      input:\n        - text\n/);
+  assert.match(text, /    - id: chat_20706\n      input:\n        - text$/);
+  // No entry may leave `input` implicit: an absent field inherits ["text"].
+  const entries = text.split('\n').filter((line) => line.trim().startsWith('- id:'));
+  const withInput = text.split('\n').filter((line) => line.trim() === 'input:');
+  assert.equal(withInput.length, entries.length);
 });
 
 test('mergeCredentialYaml creates a version-1 document from nothing', () => {

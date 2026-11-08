@@ -355,7 +355,7 @@ test('refresh-models syncs llm-pi-ai.providers.gemini-oauth into settings.yaml',
 
   const settingsPath = join(fakeHome, '.dsh', 'settings.yaml');
   const text = readFileSync(settingsPath, 'utf8');
-  assert.match(text, new RegExp('llm-pi-ai:\\n  providers:\\n    gemini-oauth:\\n      api: openai-completions\\n      baseURL: http://127\\.0\\.0\\.1:' + port + '/gemini-oauth-bridge/v1\\n      apiKeyEnv: GEMINI_OAUTH_API_KEY\\n      models:\\n        - id: gemini-3\\.1-pro-high\\n        - id: claude-opus-4-6-thinking\\n$'));
+  assert.match(text, new RegExp('llm-pi-ai:\\n  providers:\\n    gemini-oauth:\\n      api: openai-completions\\n      baseURL: http://127\\.0\\.0\\.1:' + port + '/gemini-oauth-bridge/v1\\n      apiKeyEnv: GEMINI_OAUTH_API_KEY\\n      models:\\n        - id: gemini-3\\.1-pro-high\\n          input:\\n            - text\\n            - image\\n        - id: claude-opus-4-6-thinking\\n          input:\\n            - text\\n            - image\\n$'));
   assert.ok(!text.includes('chat_20706'));
   assert.ok(!text.includes('tab_flash_lite_preview'));
   // an upstream-`disabled` model is advertised by the catalog but unusable; it
@@ -492,7 +492,10 @@ test('refresh-models hot-applies providers through the settings service when ava
               api: 'openai-completions',
               baseURL: `http://127.0.0.1:${hotPort}/gemini-oauth-bridge/v1`,
               apiKeyEnv: 'GEMINI_OAUTH_API_KEY',
-              models: [{ id: 'gemini-3.1-pro-high' }, { id: 'claude-opus-4-6-thinking' }],
+              models: [
+                { id: 'gemini-3.1-pro-high', input: ['text', 'image'] },
+                { id: 'claude-opus-4-6-thinking', input: ['text', 'image'] },
+              ],
             },
           },
         },
