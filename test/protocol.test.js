@@ -686,7 +686,23 @@ test('groupModelsByEffort collapses multi-effort families and resolveUpstreamMod
   assert.equal(resolveUpstreamModelId('gemini-2.5-pro', undefined, rawIds), 'gemini-2.5-pro');
 });
 
+test('upstream supportsImages drives the declared input beyond the family-name fallback', () => {
+  const parsed = parseAvailableModels({
+    models: {
+      'vision-proxy-model': { supportsImages: true },
+      'text-proxy-model': { supportsImages: false },
+    },
+  });
+  assert.deepEqual(parsed.caps['vision-proxy-model'], { supportsImages: true });
+  assert.ok(!('text-proxy-model' in parsed.caps));
 
+  assert.deepEqual(groupModelsByEffort(['vision-proxy-model'], parsed.caps), [
+    { id: 'vision-proxy-model', input: ['text', 'image'] },
+  ]);
+  assert.deepEqual(groupModelsByEffort(['text-proxy-model'], parsed.caps), [
+    { id: 'text-proxy-model', input: ['text'] },
+  ]);
+});
 
 // ---------- browser-trust fence: authority rule ----------
 
