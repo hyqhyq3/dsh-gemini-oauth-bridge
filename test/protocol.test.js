@@ -824,10 +824,8 @@ test('buildProviderYamlLines declares image input for multimodal families only',
     'chat_20706',
   ], 2);
   const text = lines.join('\n');
-  // Multimodal families keep the image modality DSH's gate looks for.
   assert.match(text, /    - id: gemini-2\.5-pro\n      input:\n        - text\n        - image\n/);
   assert.match(text, /    - id: claude-opus-5-5\n      input:\n        - text\n        - image\n/);
-  // Text-only upstream ids must not claim image input.
   assert.match(text, /    - id: gpt-oss-120b-medium\n      input:\n        - text\n/);
   assert.match(text, /    - id: tab_jump_flash_lite_preview\n      input:\n        - text\n/);
   assert.match(text, /    - id: chat_20706\n      input:\n        - text$/);
